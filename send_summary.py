@@ -135,6 +135,17 @@ def main():
     except Exception as e:
         logger.warning(f"Dividend validation skipped: {e}")
 
+    # ---- Export upcoming earnings as an iCalendar (.ics) for email attach ----
+    ics_path = None
+    try:
+        from earnings_calendar import write_ics
+        ics_path = write_ics(
+            fundamentals_data,
+            os.path.join(config.report_directory, "earnings.ics"),
+        )
+    except Exception as e:
+        logger.warning(f"Earnings ICS export skipped: {e}")
+
     # ---- Context, scoring, alerts ----
     usd_kes = None
     try:
@@ -183,6 +194,8 @@ def main():
     notifier = EmailNotifier(config)
     body = notifier.generate_email_body(analysis_results, sector_data, breadth)
     attachments = [pdf_path] if pdf_path else []
+    if ics_path and os.path.exists(ics_path):
+        attachments.append(ics_path)
     subject = f"NSE Daily Summary — {datetime.now():%Y-%m-%d}"
     ok = notifier.send_report(subject, body, attachments=attachments)
     if ok:

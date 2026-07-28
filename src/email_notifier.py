@@ -69,19 +69,28 @@ class EmailNotifier:
         html_part = MIMEText(html_body, 'html', 'utf-8')
         msg.attach(html_part)
 
-        # Attach files
+        # Attach files. .ics files get a proper text/calendar MIME so Gmail
+        # renders the "Add to calendar" button on the message.
         if attachments:
             for filepath in attachments:
                 try:
+                    filename = filepath.split('/')[-1]
+                    lower = filename.lower()
                     with open(filepath, 'rb') as f:
+                        payload = f.read()
+                    if lower.endswith('.ics'):
+                        part = MIMEBase('text', 'calendar', method='PUBLISH', name=filename)
+                    elif lower.endswith('.pdf'):
+                        part = MIMEBase('application', 'pdf', name=filename)
+                    else:
                         part = MIMEBase('application', 'octet-stream')
-                        part.set_payload(f.read())
-                        encoders.encode_base64(part)
-                        part.add_header(
-                            'Content-Disposition',
-                            f'attachment; filename="{filepath.split("/")[-1]}"'
-                        )
-                        msg.attach(part)
+                    part.set_payload(payload)
+                    encoders.encode_base64(part)
+                    part.add_header(
+                        'Content-Disposition',
+                        f'attachment; filename="{filename}"'
+                    )
+                    msg.attach(part)
                 except Exception as e:
                     logger.error(f"Failed to attach {filepath}: {e}")
 
