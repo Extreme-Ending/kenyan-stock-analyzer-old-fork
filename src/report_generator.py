@@ -2113,7 +2113,13 @@ tr:hover { background: #f8fafc; }
             f'</tr></thead><tbody>{earnings_rows}</tbody></table></div>'
             f'<div class="dq-note">{len(earnings_rows_raw)} stock(s) with an upcoming '
             'earnings release. Earnings dates are only published for a subset of NSE stocks; '
-            'a stock not listed here simply has no scheduled date in the feed.</div></div>')
+            'a stock not listed here simply has no scheduled date in the feed.</div>'
+            '<div class="dq-note" style="margin-top:10px;">📥 <strong>Add these to your Google Calendar:</strong> '
+            'download <a href="earnings.ics" download style="color:#3b82f6; font-weight:600;">earnings.ics</a> '
+            '→ open Google Calendar → <em>Settings ⚙ → Import &amp; export → Import</em> → select the file. '
+            'Events include 24-hour and 1-hour reminders. The daily email attaches this file automatically — '
+            'in Gmail you can also click "Add to calendar" directly on the message.</div>'
+            '</div>')
 
         # ---- FOREIGN FLOWS page (manual weekly input) ----
         foreign_body = self._build_foreign_flows_body(sym_td)

@@ -175,6 +175,14 @@ def main():
         except Exception as e:
             logger.warning(f"Dividend validation skipped: {e}")
 
+        # ---- Export upcoming earnings as an iCalendar (.ics) ----
+        try:
+            from earnings_calendar import write_ics
+            ics_path = os.path.join(config.report_directory, "earnings.ics")
+            write_ics(fundamentals_data, ics_path)
+        except Exception as e:
+            logger.warning(f"Earnings ICS export skipped: {e}")
+
         # ---- Market context: sector medians + USD/KES ----
         sector_medians = {}
         usd_kes = None
