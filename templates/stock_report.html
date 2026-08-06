@@ -412,50 +412,31 @@
     </div>
 
     <!-- Performance -->
-    <h3 class="section-subtitle">Price Performance</h3>
+    <h3 class="section-subtitle">Price Performance
+        <span style="font-weight:400; font-size:0.8rem; color:#64748b;">— % price change over each period (TradingView). <span class="positive">green = up</span>, <span class="negative">red = down</span>.</span>
+    </h3>
+    {#- One tile per period. Green when up, red when down, neutral at exactly 0,
+        and plain "N/A" (never red) when TradingView has no value for the period. -#}
+    {% macro perf_cell(label, val) -%}
+        <div class="metric">
+            <div class="label">{{ label }}</div>
+            {%- if val is not none %}
+            <div class="value {{ 'positive' if val > 0 else ('negative' if val < 0 else '') }}">{{ "%+.2f"|format(val) ~ '%' }}</div>
+            {%- else %}
+            <div class="value">N/A</div>
+            {%- endif %}
+        </div>
+    {%- endmacro %}
     <div class="metrics-grid">
-        <div class="metric">
-            <div class="label">1 Week</div>
-            <div class="value {{ 'positive' if fundamentals.perf_1w and fundamentals.perf_1w > 0 else 'negative' }}">
-                {{ ("%+.2f"|format(fundamentals.perf_1w) ~ '%') if fundamentals.perf_1w else 'N/A' }}
-            </div>
-        </div>
-        <div class="metric">
-            <div class="label">1 Month</div>
-            <div class="value {{ 'positive' if fundamentals.perf_1m and fundamentals.perf_1m > 0 else 'negative' }}">
-                {{ ("%+.2f"|format(fundamentals.perf_1m) ~ '%') if fundamentals.perf_1m else 'N/A' }}
-            </div>
-        </div>
-        <div class="metric">
-            <div class="label">3 Months</div>
-            <div class="value {{ 'positive' if fundamentals.perf_3m and fundamentals.perf_3m > 0 else 'negative' }}">
-                {{ ("%+.2f"|format(fundamentals.perf_3m) ~ '%') if fundamentals.perf_3m else 'N/A' }}
-            </div>
-        </div>
-        <div class="metric">
-            <div class="label">6 Months</div>
-            <div class="value {{ 'positive' if fundamentals.perf_6m and fundamentals.perf_6m > 0 else 'negative' }}">
-                {{ ("%+.2f"|format(fundamentals.perf_6m) ~ '%') if fundamentals.perf_6m else 'N/A' }}
-            </div>
-        </div>
-        <div class="metric">
-            <div class="label">Year to Date</div>
-            <div class="value {{ 'positive' if fundamentals.perf_ytd and fundamentals.perf_ytd > 0 else 'negative' }}">
-                {{ ("%+.2f"|format(fundamentals.perf_ytd) ~ '%') if fundamentals.perf_ytd else 'N/A' }}
-            </div>
-        </div>
-        <div class="metric">
-            <div class="label">1 Year</div>
-            <div class="value {{ 'positive' if fundamentals.perf_1y and fundamentals.perf_1y > 0 else 'negative' }}">
-                {{ ("%+.2f"|format(fundamentals.perf_1y) ~ '%') if fundamentals.perf_1y else 'N/A' }}
-            </div>
-        </div>
-        <div class="metric">
-            <div class="label">5 Years</div>
-            <div class="value {{ 'positive' if fundamentals.perf_5y and fundamentals.perf_5y > 0 else 'negative' }}">
-                {{ ("%+.2f"|format(fundamentals.perf_5y) ~ '%') if fundamentals.perf_5y else 'N/A' }}
-            </div>
-        </div>
+        {{ perf_cell('1 Day', fundamentals.change_pct) }}
+        {{ perf_cell('5 Days', fundamentals.perf_1w) }}
+        {{ perf_cell('1 Month', fundamentals.perf_1m) }}
+        {{ perf_cell('3 Months', fundamentals.perf_3m) }}
+        {{ perf_cell('6 Months', fundamentals.perf_6m) }}
+        {{ perf_cell('Year to Date', fundamentals.perf_ytd) }}
+        {{ perf_cell('1 Year', fundamentals.perf_1y) }}
+        {{ perf_cell('5 Years', fundamentals.perf_5y) }}
+        {{ perf_cell('All Time', fundamentals.perf_all) }}
         <div class="metric">
             <div class="label">Analyst Recommendation</div>
             <div class="value">{{ recommendation_text }}</div>
