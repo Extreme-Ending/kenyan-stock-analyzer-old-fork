@@ -687,7 +687,10 @@
 {% endblock %}
 
 {% block extra_css %}
-<style>
+    {# NOTE: base.html already wraps this block inside its own <style>…</style>.
+       Do NOT add another <style> tag here — a nested <style> becomes invalid CSS
+       and silently drops the first rule that follows it (this used to kill
+       `.positive`, so green never showed while red/amber did). Keep bare CSS. #}
     /* Good/bad colour cues — green = healthy, red = weak/risky.
        (These classes were previously undefined in the report, so the cues
        never actually showed.) */
@@ -844,5 +847,4 @@
         .explanation-grid { grid-template-columns: 1fr; }
         .key-metrics-row { grid-template-columns: repeat(2, 1fr); }
     }
-</style>
 {% endblock %}
