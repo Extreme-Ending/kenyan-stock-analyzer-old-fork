@@ -1018,8 +1018,12 @@ ul {{ margin: 4px 0; padding-left: 18px; }} li {{ margin: 2px 0; }}
                 'dividend_type': fund.get('dividend_type'),
                 # Next earnings date (used by the Next Earnings page)
                 'earnings_next_date': fund.get('earnings_next_date'),
-                # Transparent factor score (0-100)
+                # Transparent factor score (0-100) + full breakdown for hover
                 'score': (scores or {}).get(symbol, {}).get('overall'),
+                'score_detail': (scores or {}).get(symbol, {}),
+                # Liquidity (for the market heatmap sizing + most-traded chart)
+                'value_traded': fund.get('value_traded'),
+                'volume': fund.get('volume'),
                 # Price validation (independent cross-check + freshness)
                 'validation': (validations or {}).get(symbol, {}),
             }
@@ -1081,12 +1085,17 @@ ul {{ margin: 4px 0; padding-left: 18px; }} li {{ margin: 2px 0; }}
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f1f5f9; color: #1e293b; }
 .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
-.header { background: linear-gradient(135deg, #0f172a, #1e293b); color: white; padding: 26px; border-radius: 12px; margin-bottom: 16px; text-align: center; }
-.header h1 { font-size: 1.8rem; margin-bottom: 5px; }
-.header .date { color: #94a3b8; font-size: 0.85rem; }
-/* Nav */
-.nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
-.nav-item { padding: 10px 16px; border-radius: 8px; background: white; color: #334155; text-decoration: none; font-weight: 600; font-size: 0.9rem; box-shadow: 0 1px 3px rgba(0,0,0,0.06); border: 2px solid transparent; }
+/* Sticky top bar: header + nav stay visible while scrolling */
+.topbar { position: sticky; top: 0; z-index: 200; background: #f1f5f9; padding-top: 10px; margin: -10px 0 16px; }
+.topbar.stuck { box-shadow: 0 6px 16px rgba(15,23,42,0.10); }
+.header { background: linear-gradient(135deg, #0f172a, #1e293b); color: white; padding: 14px 22px; border-radius: 12px; margin-bottom: 10px; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.header h1 { font-size: 1.4rem; }
+.header .date { color: #94a3b8; font-size: 0.82rem; }
+/* Nav — single responsive line (horizontal scroll on small screens) */
+.nav { display: flex; flex-wrap: nowrap; gap: 6px; overflow-x: auto; padding-bottom: 6px; margin-bottom: 8px; scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; -webkit-overflow-scrolling: touch; }
+.nav::-webkit-scrollbar { height: 6px; }
+.nav::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+.nav-item { flex: 0 0 auto; white-space: nowrap; padding: 8px 12px; border-radius: 8px; background: white; color: #334155; text-decoration: none; font-weight: 600; font-size: 0.82rem; box-shadow: 0 1px 3px rgba(0,0,0,0.06); border: 2px solid transparent; }
 .nav-item:hover { border-color: #93c5fd; }
 .nav-item.active { background: #1e293b; color: #fff; }
 .page-intro { color: #64748b; font-size: 0.9rem; margin-bottom: 16px; }
@@ -1173,6 +1182,46 @@ tr:hover { background: #f8fafc; }
 .fmid { color: #d97706; font-weight: 700; }
 .fbad { color: #dc2626; font-weight: 700; }
 @media (max-width: 768px) { .grid-2 { grid-template-columns: 1fr; } }
+/* ===== Floating hover tooltip (rich preview, never clipped) ===== */
+#hovertip { position: fixed; z-index: 9999; display: none; max-width: 340px; background: #0f172a; color: #e2e8f0; border-radius: 12px; padding: 12px 14px; font-size: 0.78rem; line-height: 1.5; box-shadow: 0 10px 34px rgba(2,6,23,0.4); pointer-events: none; }
+#hovertip .tt-h { font-weight: 800; color: #fff; font-size: 0.92rem; margin-bottom: 6px; display: flex; justify-content: space-between; gap: 10px; }
+#hovertip .tt-sub { color: #94a3b8; font-size: 0.72rem; margin-bottom: 8px; }
+#hovertip .tt-row { display: flex; justify-content: space-between; gap: 12px; margin: 3px 0; }
+#hovertip .tt-k { color: #94a3b8; }
+#hovertip .tt-bar { height: 6px; border-radius: 3px; background: #1e293b; overflow: hidden; margin: 3px 0 6px; }
+#hovertip .tt-bar > span { display: block; height: 100%; border-radius: 3px; }
+#hovertip .tt-note { color: #cbd5e1; font-size: 0.72rem; margin-top: 6px; border-top: 1px solid #1e293b; padding-top: 6px; }
+.hint { cursor: help; }
+/* ===== Market heatmap ===== */
+.heat-wrap { display: flex; flex-direction: column; gap: 14px; }
+.heat-sector-label { font-size: 0.72rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 6px; }
+.heat-grid { display: flex; flex-wrap: wrap; gap: 4px; }
+.heat-tile { width: 88px; height: 58px; border-radius: 6px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #fff; cursor: pointer; text-decoration: none; transition: transform .08s ease, box-shadow .08s ease; }
+.heat-tile:hover { transform: scale(1.09); box-shadow: 0 6px 18px rgba(2,6,23,0.3); position: relative; z-index: 2; }
+.heat-tile .ht-sym { font-weight: 800; font-size: 0.8rem; text-shadow: 0 1px 2px rgba(0,0,0,0.25); }
+.heat-tile .ht-chg { font-size: 0.72rem; font-weight: 600; opacity: 0.96; text-shadow: 0 1px 2px rgba(0,0,0,0.25); }
+.heat-legend { display: flex; align-items: center; gap: 5px; font-size: 0.72rem; color: #64748b; margin-top: 12px; flex-wrap: wrap; }
+.heat-legend i { width: 22px; height: 12px; border-radius: 2px; display: inline-block; }
+/* ===== Lightweight HTML charts ===== */
+.hbar-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 0.82rem; }
+.hbar-label { width: 60px; font-weight: 700; flex: 0 0 auto; }
+.hbar-label a { color: #3b82f6; text-decoration: none; }
+.hbar-track { flex: 1; background: #f1f5f9; border-radius: 5px; overflow: hidden; height: 20px; }
+.hbar-fill { height: 100%; border-radius: 5px; min-width: 2px; transition: width .3s ease; }
+.hbar-val { width: 78px; text-align: right; flex: 0 0 auto; font-variant-numeric: tabular-nums; font-weight: 600; }
+.dbar { display: grid; grid-template-columns: 60px 1fr 70px; align-items: center; gap: 6px; margin: 3px 0; font-size: 0.82rem; }
+.dbar .dbar-track { position: relative; height: 20px; background: #f8fafc; border-radius: 4px; }
+.dbar .dbar-mid { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: #cbd5e1; }
+.dbar .dbar-fill { position: absolute; top: 2px; bottom: 2px; border-radius: 3px; }
+.breadth-bar { display: flex; height: 38px; border-radius: 9px; overflow: hidden; font-size: 0.82rem; font-weight: 700; color: #fff; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.03); }
+.breadth-bar > div { display: flex; align-items: center; justify-content: center; min-width: 0; white-space: nowrap; }
+.breadth-legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px; font-size: 0.78rem; color: #475569; }
+.breadth-legend b { font-variant-numeric: tabular-nums; }
+.hist-wrap { display: flex; align-items: flex-end; gap: 3px; height: 120px; padding-top: 10px; }
+.hist-bin { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
+.hist-bar { width: 100%; border-radius: 3px 3px 0 0; min-height: 2px; }
+.hist-x { font-size: 0.6rem; color: #94a3b8; margin-top: 4px; white-space: nowrap; }
+@media (max-width: 768px) { .heat-tile { width: 72px; height: 50px; } }
 </style>"""
 
     def _make_foreign_flow_trend_chart(self, weeks):
@@ -1232,21 +1281,37 @@ tr:hover { background: #f8fafc; }
             f'<a href="{fn}" class="nav-item{" active" if fn == active_file else ""}">{lbl}</a>'
             for fn, lbl in self._NAV
         )
-        js = ("<script>function filterTable(){var i=document.getElementById('search');"
-              "var q=i?i.value.toLowerCase():'';var rows=document.querySelectorAll('#mainTable tbody tr');"
-              "rows.forEach(function(r){r.style.display=(!q||r.textContent.toLowerCase().indexOf(q)>-1)?'':'none';});}</script>"
-              ) if with_filter else ""
+        filter_js = ("function filterTable(){var i=document.getElementById('search');"
+                     "var q=i?i.value.toLowerCase():'';var rows=document.querySelectorAll('#mainTable tbody tr');"
+                     "rows.forEach(function(r){r.style.display=(!q||r.textContent.toLowerCase().indexOf(q)>-1)?'':'none';});}"
+                     ) if with_filter else ""
+        # Floating hover-tooltip (rich, never clipped by scroll containers) +
+        # sticky-topbar shadow toggle. Reads HTML from each element's data-tip.
+        tip_js = (
+            "(function(){var tip=document.getElementById('hovertip');if(!tip)return;"
+            "function pos(e){var x=e.clientX+16,y=e.clientY+16,w=tip.offsetWidth,h=tip.offsetHeight;"
+            "if(x+w>window.innerWidth-10)x=e.clientX-w-16;if(y+h>window.innerHeight-10)y=e.clientY-h-16;"
+            "if(x<6)x=6;if(y<6)y=6;tip.style.left=x+'px';tip.style.top=y+'px';}"
+            "document.addEventListener('mouseover',function(e){var el=e.target.closest?e.target.closest('[data-tip]'):null;"
+            "if(el){tip.innerHTML=el.getAttribute('data-tip');tip.style.display='block';pos(e);}else{tip.style.display='none';}});"
+            "document.addEventListener('mousemove',function(e){if(tip.style.display==='block')pos(e);});"
+            "var tb=document.querySelector('.topbar');"
+            "if(tb){window.addEventListener('scroll',function(){tb.classList.toggle('stuck',window.scrollY>8);});}"
+            "})();")
+        js = f"<script>{filter_js}{tip_js}</script>"
         return (
             '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
             f'<title>{page_title}</title>' + self._dashboard_css() + '</head><body>'
             '<div class="container">'
+            '<div class="topbar">'
             f'<div class="header"><h1>🇰🇪 NSE Dashboard</h1><div class="date">{subtitle}</div></div>'
             f'<div class="nav">{nav}</div>'
+            '</div>'
             f'{body_html}'
             '<div class="footer">Generated by Kenyan Stock Analyzer · '
             'Click any stock symbol for its full individual report</div>'
-            '</div>' + js + '</body></html>'
+            '</div><div id="hovertip"></div>' + js + '</body></html>'
         )
 
     @staticmethod
@@ -2152,6 +2217,179 @@ tr:hover { background: #f8fafc; }
                 '<p class="page-intro">Everything on this page, in simple terms with examples.</p>'
                 f'<div class="explain-grid">{items}</div></div>')
 
+    # ==================================================================
+    # VISUALS — market heatmap, snapshot charts, rich hover previews
+    # ==================================================================
+    @staticmethod
+    def _change_color(chg):
+        """(bg, fg) on a red→grey→green scale for a daily % change (±4% caps)."""
+        if chg is None:
+            return ("#cbd5e1", "#475569")
+        t = max(-1.0, min(1.0, chg / 4.0))
+        if t >= 0:  # light green #bbf7d0 → dark green #158a3d
+            r = int(187 + (21 - 187) * t); g = int(247 + (138 - 247) * t); b = int(208 + (61 - 208) * t)
+        else:       # light red #fecaca → dark red #b91c1c
+            u = -t
+            r = int(254 + (185 - 254) * u); g = int(202 + (28 - 202) * u); b = int(202 + (28 - 202) * u)
+        fg = "#ffffff" if abs(t) > 0.5 else "#0f172a"
+        return (f"rgb({r},{g},{b})", fg)
+
+    def _stock_tip(self, s):
+        """Build the rich hover-preview HTML for one stock, escaped for a
+        data-tip="" attribute (price, change, signal + full score breakdown
+        with the reasons behind each factor). Purely from real data."""
+        sd = s.get("score_detail") or {}
+        overall = sd.get("overall")
+        chg = s.get("change")
+        chgc = "#4ade80" if (chg or 0) > 0 else "#f87171" if (chg or 0) < 0 else "#94a3b8"
+        chgs = f"{chg:+.2f}%" if chg is not None else "—"
+        price = f"KES {s['price']:.2f}" if s.get("price") else "KES —"
+        p = [f"<div class='tt-h'><span>{s['symbol']}</span><span style='color:{chgc}'>{chgs}</span></div>",
+             f"<div class='tt-sub'>{s.get('sector') or 'NSE'} · {price} · {s.get('signal_label','')}</div>"]
+        if overall is not None:
+            oc = "#22c55e" if overall >= 70 else "#f59e0b" if overall >= 45 else "#ef4444"
+            p.append(f"<div class='tt-row'><span class='tt-k'>Overall score</span>"
+                     f"<span style='color:{oc};font-weight:800'>{overall}/100</span></div>")
+            for key, label in [("value", "Value"), ("quality", "Quality"),
+                               ("momentum", "Momentum"), ("dividend", "Dividend"),
+                               ("liquidity", "Liquidity")]:
+                v = sd.get(key)
+                if v is None:
+                    p.append(f"<div class='tt-row'><span class='tt-k'>{label}</span><span>n/a</span></div>")
+                    continue
+                col = "#22c55e" if v >= 70 else "#f59e0b" if v >= 45 else "#ef4444"
+                p.append(f"<div class='tt-row'><span class='tt-k'>{label}</span><span>{v}/100</span></div>"
+                         f"<div class='tt-bar'><span style='width:{v}%;background:{col}'></span></div>")
+            reasons = sd.get("reasons") or {}
+            allr = []
+            for key in ("value", "quality", "momentum", "dividend", "liquidity"):
+                allr += (reasons.get(key) or [])
+            if allr:
+                p.append(f"<div class='tt-note'>Why: {' · '.join(allr[:6])}</div>")
+            p.append("<div class='tt-note'>Score = weighted blend of Value, Quality, Momentum, "
+                     "Dividend &amp; Liquidity (0–100). A transparent screen, not advice.</div>")
+        else:
+            p.append("<div class='tt-note'>Not enough public data to score this stock yet.</div>")
+        html = "".join(p)
+        # escape for a double-quoted HTML attribute (inner markup uses ' quotes)
+        return html.replace("&", "&amp;").replace('"', "&quot;")
+
+    def _build_heatmap(self, stocks):
+        """Sector-grouped market heatmap: each stock a tile coloured by today's
+        move, with a hover preview. Nothing invented — stocks with no trade
+        show grey."""
+        bysec = {}
+        for s in stocks:
+            bysec.setdefault(s.get("sector") or "Other", []).append(s)
+        order = sorted(bysec.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+        groups = ""
+        for sec, items in order:
+            items = sorted(items, key=lambda s: (s.get("change") is None, -(s.get("change") or 0)))
+            tiles = ""
+            for s in items:
+                bg, fg = self._change_color(s.get("change"))
+                chg = s.get("change")
+                chgs = f"{chg:+.1f}%" if chg is not None else "—"
+                link = s.get("report_file") or "#"
+                tiles += (f"<a href='{link}' class='heat-tile' style='background:{bg};color:{fg}' "
+                          f"data-tip=\"{self._stock_tip(s)}\">"
+                          f"<span class='ht-sym'>{s['symbol']}</span>"
+                          f"<span class='ht-chg'>{chgs}</span></a>")
+            groups += (f"<div class='heat-sector'><div class='heat-sector-label'>{sec} "
+                       f"({len(items)})</div><div class='heat-grid'>{tiles}</div></div>")
+        legend = ("<div class='heat-legend'>Daily move: "
+                  "<i style='background:rgb(185,28,28)'></i>"
+                  "<i style='background:rgb(254,202,202)'></i><span>−4%+ · 0 ·</span>"
+                  "<i style='background:rgb(187,247,208)'></i>"
+                  "<i style='background:rgb(21,138,61)'></i><span>+4%+</span>"
+                  "&nbsp;·&nbsp;<i style='background:#cbd5e1'></i><span>no trade</span>"
+                  "&nbsp;·&nbsp;hover a tile for price, signal &amp; score · click to open the report.</div>")
+        return (f"<div class='section'><h2>🗺️ Market Heatmap — the day at a glance</h2>"
+                "<p class='page-intro'>Every stock coloured by today's price move and grouped by sector. "
+                "Greener = up, redder = down, a bigger move = a deeper colour. Hover any tile for its details.</p>"
+                f"<div class='heat-wrap'>{groups}</div>{legend}</div>")
+
+    def _build_market_snapshot(self, stocks):
+        """Advance/decline breadth bar + a distribution of today's % moves."""
+        adv = [s for s in stocks if (s.get("change") or 0) > 0]
+        dec = [s for s in stocks if (s.get("change") or 0) < 0]
+        unch = [s for s in stocks if s.get("change") == 0]
+        nodata = [s for s in stocks if s.get("change") is None]
+        n = len(stocks) or 1
+        traded = len(adv) + len(dec) + len(unch)
+        seg = ""
+        for count, col, lab in [(len(adv), "#16a34a", "Advancers"),
+                                (len(unch), "#94a3b8", "Flat"),
+                                (len(dec), "#dc2626", "Decliners")]:
+            if count:
+                seg += (f"<div style='flex:{count};background:{col};' "
+                        f"data-tip=\"{lab}: {count} of {traded} traded stocks\">{count}</div>")
+        breadth = (
+            "<div class='section'><h2>⚖️ Advancers vs Decliners</h2>"
+            "<p class='page-intro'>How many stocks rose vs fell today — the market's breadth.</p>"
+            f"<div class='breadth-bar'>{seg}</div>"
+            "<div class='breadth-legend'>"
+            f"<span style='color:#16a34a'>▲ Advancers <b>{len(adv)}</b></span>"
+            f"<span style='color:#94a3b8'>■ Flat <b>{len(unch)}</b></span>"
+            f"<span style='color:#dc2626'>▼ Decliners <b>{len(dec)}</b></span>"
+            + (f"<span style='color:#cbd5e1'>◻ No trade <b>{len(nodata)}</b></span>" if nodata else "")
+            + "</div></div>")
+
+        # distribution histogram of daily % moves
+        bins = [(-99, -3, "≤−3%", "#b91c1c"), (-3, -2, "−3..−2", "#dc2626"),
+                (-2, -1, "−2..−1", "#f87171"), (-1, 0, "−1..0", "#fecaca"),
+                (0, 0.0001, "0%", "#cbd5e1"), (0.0001, 1, "0..1", "#bbf7d0"),
+                (1, 2, "1..2", "#4ade80"), (2, 3, "2..3", "#16a34a"),
+                (3, 99, "≥3%", "#15803d")]
+        counts = []
+        for lo, hi, lab, col in bins:
+            if lab == "0%":
+                c = len(unch)
+            else:
+                c = len([s for s in stocks if s.get("change") is not None and lo < s["change"] <= hi])
+            counts.append((c, lab, col))
+        mx = max((c for c, _, _ in counts), default=1) or 1
+        histbars = ""
+        for c, lab, col in counts:
+            h = int(6 + (100 - 6) * (c / mx)) if c else 2
+            histbars += (f"<div class='hist-bin'><div class='hist-bar' style='height:{h}%;background:{col}' "
+                         f"data-tip=\"{c} stock(s) moved {lab} today\"></div>"
+                         f"<div class='hist-x'>{lab}</div></div>")
+        hist = (
+            "<div class='section'><h2>📊 Spread of today's moves</h2>"
+            "<p class='page-intro'>How many stocks fell into each move bucket — is the market clustered "
+            "up, down, or flat?</p>"
+            f"<div class='hist-wrap'>{histbars}</div></div>")
+        return f"<div class='grid-2'>{breadth}{hist}</div>"
+
+    def _build_most_active(self, stocks):
+        """Most-traded stocks by value traded (KES) — horizontal bars, coloured
+        by the day's move."""
+        act = [s for s in stocks if s.get("value_traded")]
+        if not act:
+            return ""
+        act.sort(key=lambda s: s["value_traded"], reverse=True)
+        act = act[:10]
+        mx = act[0]["value_traded"] or 1
+        rows = ""
+        for s in act:
+            vt = s["value_traded"]
+            w = max(2, int(100 * vt / mx))
+            bg, _ = self._change_color(s.get("change"))
+            link = s.get("report_file") or "#"
+            vt_txt = (f"KES {vt/1e9:.2f}B" if vt >= 1e9 else f"KES {vt/1e6:.1f}M" if vt >= 1e6
+                      else f"KES {vt/1e3:.0f}K")
+            rows += (f"<div class='hbar-row' data-tip=\"{self._stock_tip(s)}\">"
+                     f"<div class='hbar-label'><a href='{link}'>{s['symbol']}</a></div>"
+                     f"<div class='hbar-track'><div class='hbar-fill' style='width:{w}%;background:{bg}'></div></div>"
+                     f"<div class='hbar-val'>{vt_txt}</div></div>")
+        return ("<div class='section'><h2>💰 Most actively traded today</h2>"
+                "<p class='page-intro'>Where the money went — stocks with the highest value traded (KES) today. "
+                "Bar length = value traded, colour = the day's price move. Hover for details.</p>"
+                f"{rows}"
+                "<div class='dq-note'>Value traded = shares traded × price. High value = easy to buy/sell "
+                "without moving the price much.</div></div>")
+
     def _build_dashboard_pages(self, stocks, gainers, losers, sectors, breadth,
                                sector_chart, bullish, bearish, neutral, total,
                                data_date=None, alerts=None, usd_kes=None):
@@ -2193,13 +2431,16 @@ tr:hover { background: #f8fafc; }
         def score_td(s):
             sc = s.get('score')
             if sc is None:
-                return '<td>—</td>'
+                return f'<td data-tip="{self._stock_tip(s)}"><span class="score undefined hint">—</span></td>'
             c = 'score-high' if sc >= 70 else 'score-mid' if sc >= 45 else 'score-low'
-            return f'<td><span class="score {c}">{sc}</span></td>'
+            # data-tip → hover the score to see how it was built (factor breakdown)
+            return f'<td data-tip="{self._stock_tip(s)}"><span class="score {c} hint">{sc}</span></td>'
 
         def sym_td(s):
             link = s['report_file'] if s['report_file'] else '#'
-            return f'<td><a href="{link}" class="stock-link"><strong>{s["symbol"]}</strong></a></td>'
+            # data-tip → hover any symbol for a quick preview (price, signal, score)
+            return (f'<td data-tip="{self._stock_tip(s)}">'
+                    f'<a href="{link}" class="stock-link"><strong>{s["symbol"]}</strong></a></td>')
 
         # ---- Market pulse stats (shared on Overview) ----
         breadth_html = ''
@@ -2238,15 +2479,26 @@ tr:hover { background: #f8fafc; }
         ov_rows = ''.join(
             f'<tr>{sym_td(s)}{signal_td(s)}<td>{price_cell(s)}</td>{change_td(s)}{score_td(s)}</tr>'
             for s in stocks)
+        # Visual market overview (heatmap + breadth/distribution + most active)
+        heatmap_html = self._build_heatmap(stocks)
+        snapshot_html = self._build_market_snapshot(stocks)
+        active_html = self._build_most_active(stocks)
         overview_body = (
-            '<p class="page-intro">Your at-a-glance view: the Buy/Sell signal, price and overall score for every stock. '
-            'Use the tabs above for technicals, fundamentals, dividends, sectors and data quality.</p>'
-            + stats_html + movers_html +
+            '<p class="page-intro">Your at-a-glance view: a market heatmap, breadth, the busiest stocks, '
+            'and the Buy/Sell signal, price &amp; score for every stock. Hover any tile, bar or score for a '
+            'preview. Use the tabs above for technicals, fundamentals, dividends, bonds and more.</p>'
+            + stats_html
+            + heatmap_html
+            + snapshot_html
+            + active_html
+            + movers_html +
             '<div class="section"><h2>📋 All Stocks — Signal &amp; Score</h2>'
+            '<p class="dq-note" style="margin-bottom:12px;">💡 Hover a stock symbol or its score for a preview — '
+            'price, signal and the full factor breakdown behind the score.</p>'
             + search_bar +
             '<div class="table-wrap"><table id="mainTable"><thead><tr>'
             '<th>Symbol</th><th title="TradingView Buy/Sell rating">TV Signal</th><th>Price</th>'
-            '<th>Change</th><th title="0-100 factor screen">Score</th>'
+            '<th>Change</th><th title="0-100 factor screen — hover a score for the breakdown">Score</th>'
             f'</tr></thead><tbody>{ov_rows}</tbody></table></div></div>')
 
         # ---- TECHNICALS page ----
