@@ -1068,6 +1068,7 @@ ul {{ margin: 4px 0; padding-left: 18px; }} li {{ margin: 2px 0; }}
     # Navigation across the dashboard pages (filename, label).
     _NAV = [
         ('index.html', '🏠 Overview'),
+        ('visuals.html', '🗺️ Visuals'),
         ('technicals.html', '📈 Technicals'),
         ('fundamentals.html', '💰 Fundamentals'),
         ('dividends.html', '💵 Dividends'),
@@ -2244,8 +2245,15 @@ tr:hover { background: #f8fafc; }
         chgc = "#4ade80" if (chg or 0) > 0 else "#f87171" if (chg or 0) < 0 else "#94a3b8"
         chgs = f"{chg:+.2f}%" if chg is not None else "—"
         price = f"KES {s['price']:.2f}" if s.get("price") else "KES —"
+        # previous close (yesterday) implied by today's close and % change
+        prevc = None
+        if s.get("price") and chg is not None and (1 + chg / 100) != 0:
+            prevc = s["price"] / (1 + chg / 100)
         p = [f"<div class='tt-h'><span>{s['symbol']}</span><span style='color:{chgc}'>{chgs}</span></div>",
              f"<div class='tt-sub'>{s.get('sector') or 'NSE'} · {price} · {s.get('signal_label','')}</div>"]
+        if prevc:
+            p.append(f"<div class='tt-row'><span class='tt-k'>Today vs yesterday</span>"
+                     f"<span>{s['price']:.2f} ← {prevc:.2f}</span></div>")
         if overall is not None:
             oc = "#22c55e" if overall >= 70 else "#f59e0b" if overall >= 45 else "#ef4444"
             p.append(f"<div class='tt-row'><span class='tt-k'>Overall score</span>"
@@ -2304,9 +2312,10 @@ tr:hover { background: #f8fafc; }
                   "<i style='background:rgb(21,138,61)'></i><span>+4%+</span>"
                   "&nbsp;·&nbsp;<i style='background:#cbd5e1'></i><span>no trade</span>"
                   "&nbsp;·&nbsp;hover a tile for price, signal &amp; score · click to open the report.</div>")
-        return (f"<div class='section'><h2>🗺️ Market Heatmap — the day at a glance</h2>"
-                "<p class='page-intro'>Every stock coloured by today's price move and grouped by sector. "
-                "Greener = up, redder = down, a bigger move = a deeper colour. Hover any tile for its details.</p>"
+        return (f"<div class='section'><h2>🗂️ Heatmap by sector</h2>"
+                "<p class='page-intro'>The same stocks, grouped by sector so you can see which parts of the "
+                "market moved together today. Colour = <strong>today's price change vs yesterday's close</strong> "
+                "(greener = up, redder = down, bigger move = deeper colour). Hover any tile for details.</p>"
                 f"<div class='heat-wrap'>{groups}</div>{legend}</div>")
 
     def _build_market_snapshot(self, stocks):
@@ -2389,6 +2398,57 @@ tr:hover { background: #f8fafc; }
                 f"{rows}"
                 "<div class='dq-note'>Value traded = shares traded × price. High value = easy to buy/sell "
                 "without moving the price much.</div></div>")
+
+    def _build_market_heatmap_all(self, stocks):
+        """One big whole-market heatmap: every stock in a single map, each tile
+        SIZED by market cap (bigger company = bigger tile) and COLOURED by
+        today's change vs yesterday's close. Shows the true shape of the NSE —
+        the few big caps dominate. Hover for details."""
+        import math
+        caps = [s.get("market_cap") for s in stocks if s.get("market_cap")]
+        maxcap = max(caps) if caps else 1
+        # biggest companies first so the map reads large → small
+        items = sorted(stocks, key=lambda s: (s.get("market_cap") or 0), reverse=True)
+        tiles = ""
+        for s in items:
+            cap = s.get("market_cap") or 0
+            frac = math.sqrt(cap / maxcap) if (maxcap and cap > 0) else 0.0  # 0..1 (area ∝ cap)
+            side = int(58 + frac * (140 - 58))   # 58px … 140px square
+            fs = 0.60 + frac * 0.45              # font scales with size
+            bg, fg = self._change_color(s.get("change"))
+            chg = s.get("change")
+            chgs = f"{chg:+.1f}%" if chg is not None else "—"
+            link = s.get("report_file") or "#"
+            tiles += (f"<a href='{link}' class='heat-tile' "
+                      f"style='width:{side}px;height:{side}px;background:{bg};color:{fg}' "
+                      f"data-tip=\"{self._stock_tip(s)}\">"
+                      f"<span class='ht-sym' style='font-size:{fs:.2f}rem'>{s['symbol']}</span>"
+                      f"<span class='ht-chg' style='font-size:{fs * 0.82:.2f}rem'>{chgs}</span></a>")
+        legend = ("<div class='heat-legend'>Tile size = market cap · colour = today's change vs yesterday: "
+                  "<i style='background:rgb(185,28,28)'></i>"
+                  "<i style='background:rgb(254,202,202)'></i><span>−4%+ · 0 ·</span>"
+                  "<i style='background:rgb(187,247,208)'></i>"
+                  "<i style='background:rgb(21,138,61)'></i><span>+4%+</span>"
+                  "&nbsp;·&nbsp;<i style='background:#cbd5e1'></i><span>no trade</span></div>")
+        return ("<div class='section'><h2>🗺️ Whole-market heatmap</h2>"
+                "<p class='page-intro'>The entire NSE in one map. Each tile is a stock, "
+                "<strong>sized by market cap</strong> (bigger company = bigger tile) and "
+                "<strong>coloured by today's move vs yesterday's close</strong>. This is the market's true shape — "
+                "the handful of giants (Safaricom, Equity, KCB, EABL…) carry most of the weight. Hover any tile "
+                "for its price, previous close, signal and score; click to open the report.</p>"
+                f"<div class='heat-grid' style='align-items:flex-start'>{tiles}</div>{legend}</div>")
+
+    def _build_visuals_body(self, stocks):
+        """The Visuals tab — all the charts moved off the (busy) Overview:
+        whole-market heatmap, sector heatmap, breadth + distribution, and the
+        most-actively-traded chart. Interactive; hover anything for a preview."""
+        return (
+            "<p class='page-intro'>A visual read of the market today — hover any tile or bar for details, "
+            "click a stock to open its full report. All colours use today's price change vs yesterday's close.</p>"
+            + self._build_market_heatmap_all(stocks)
+            + self._build_heatmap(stocks)
+            + self._build_market_snapshot(stocks)
+            + self._build_most_active(stocks))
 
     def _build_dashboard_pages(self, stocks, gainers, losers, sectors, breadth,
                                sector_chart, bullish, bearish, neutral, total,
@@ -2479,22 +2539,20 @@ tr:hover { background: #f8fafc; }
         ov_rows = ''.join(
             f'<tr>{sym_td(s)}{signal_td(s)}<td>{price_cell(s)}</td>{change_td(s)}{score_td(s)}</tr>'
             for s in stocks)
-        # Visual market overview (heatmap + breadth/distribution + most active)
-        heatmap_html = self._build_heatmap(stocks)
-        snapshot_html = self._build_market_snapshot(stocks)
-        active_html = self._build_most_active(stocks)
+        # The charts live on their own Visuals tab now (Overview stays lean).
+        visuals_body = self._build_visuals_body(stocks)
         overview_body = (
-            '<p class="page-intro">Your at-a-glance view: a market heatmap, breadth, the busiest stocks, '
-            'and the Buy/Sell signal, price &amp; score for every stock. Hover any tile, bar or score for a '
-            'preview. Use the tabs above for technicals, fundamentals, dividends, bonds and more.</p>'
+            '<p class="page-intro">Your at-a-glance view: the market pulse, top movers and the Buy/Sell signal, '
+            'price &amp; score for every stock. Hover a symbol or score for a preview. '
+            'For the market heatmaps and charts, see the <a href="visuals.html" style="color:#3b82f6;font-weight:600;">🗺️ Visuals</a> tab.</p>'
             + stats_html
-            + heatmap_html
-            + snapshot_html
-            + active_html
+            + '<div class="dq-note" style="margin:-8px 0 18px;">📊 Looking for the heatmap and charts? '
+            'They moved to the <a href="visuals.html" style="color:#3b82f6;font-weight:600;">🗺️ Visuals</a> tab '
+            'to keep this page uncluttered.</div>'
             + movers_html +
             '<div class="section"><h2>📋 All Stocks — Signal &amp; Score</h2>'
             '<p class="dq-note" style="margin-bottom:12px;">💡 Hover a stock symbol or its score for a preview — '
-            'price, signal and the full factor breakdown behind the score.</p>'
+            'price, today-vs-yesterday, signal and the full factor breakdown behind the score.</p>'
             + search_bar +
             '<div class="table-wrap"><table id="mainTable"><thead><tr>'
             '<th>Symbol</th><th title="TradingView Buy/Sell rating">TV Signal</th><th>Price</th>'
@@ -2805,6 +2863,7 @@ tr:hover { background: #f8fafc; }
         # ---- Assemble & write all pages ----
         pages = {
             'index.html': self._page_shell('NSE Dashboard — Overview', 'index.html', subtitle, overview_body, with_filter=True),
+            'visuals.html': self._page_shell('NSE — Visuals', 'visuals.html', subtitle, visuals_body),
             'technicals.html': self._page_shell('NSE — Technicals', 'technicals.html', subtitle, technicals_body, with_filter=True),
             'fundamentals.html': self._page_shell('NSE — Fundamentals', 'fundamentals.html', subtitle, fundamentals_body, with_filter=True),
             'dividends.html': self._page_shell('NSE — Dividends', 'dividends.html', subtitle, dividends_body, with_filter=True),
