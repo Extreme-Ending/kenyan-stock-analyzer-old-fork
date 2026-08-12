@@ -1203,6 +1203,14 @@ tr:hover { background: #f8fafc; }
 .heat-tile .ht-chg { font-size: 0.72rem; font-weight: 600; opacity: 0.96; text-shadow: 0 1px 2px rgba(0,0,0,0.25); }
 .heat-legend { display: flex; align-items: center; gap: 5px; font-size: 0.72rem; color: #64748b; margin-top: 12px; flex-wrap: wrap; }
 .heat-legend i { width: 22px; height: 12px; border-radius: 2px; display: inline-block; }
+/* ===== Squarified treemap (Finviz-style market map) ===== */
+.treemap { position: relative; width: 100%; aspect-ratio: 1000 / 620; background: #0b1220; border-radius: 10px; overflow: hidden; container-type: size; }
+.tm-tile { position: absolute; box-sizing: border-box; border: 1px solid rgba(3,7,18,0.55); display: flex; flex-direction: column; align-items: center; justify-content: center; overflow: hidden; text-decoration: none; color: #fff; text-align: center; line-height: 1.05; transition: filter .08s ease; }
+.tm-tile:hover { filter: brightness(1.18); z-index: 5; }
+.tm-tile .tm-sym { font-weight: 800; text-shadow: 0 1px 2px rgba(0,0,0,0.55); }
+.tm-tile .tm-chg { font-weight: 600; opacity: 0.95; text-shadow: 0 1px 2px rgba(0,0,0,0.55); }
+.tm-label { position: absolute; box-sizing: border-box; padding: 1px 4px; font-weight: 800; letter-spacing: 0.02em; color: #e2e8f0; text-transform: uppercase; white-space: nowrap; overflow: hidden; pointer-events: none; text-shadow: 0 1px 2px rgba(0,0,0,0.7); z-index: 3; }
+@media (max-width: 640px) { .treemap { aspect-ratio: 1000 / 900; } }
 /* ===== Lightweight HTML charts ===== */
 .hbar-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 0.82rem; }
 .hbar-label { width: 60px; font-weight: 700; flex: 0 0 auto; }
@@ -2399,22 +2407,143 @@ tr:hover { background: #f8fafc; }
                 "<div class='dq-note'>Value traded = shares traded × price. High value = easy to buy/sell "
                 "without moving the price much.</div></div>")
 
+    # ---- squarified treemap (Bruls/Huizing/van Wijk) ----
+    @staticmethod
+    def _tm_normalize(sizes, dx, dy):
+        total = float(sum(sizes)) or 1.0
+        return [s * dx * dy / total for s in sizes]
+
+    @staticmethod
+    def _tm_layout(sizes, x, y, dx, dy):
+        # lay a run of tiles along the shorter side so they stay squarish
+        if dx >= dy:  # a row across the top
+            w = sum(sizes) / dy
+            out, yy = [], y
+            for s in sizes:
+                out.append({"x": x, "y": yy, "dx": w, "dy": s / w})
+                yy += s / w
+            return out
+        h = sum(sizes) / dx  # a column down the left
+        out, xx = [], x
+        for s in sizes:
+            out.append({"x": xx, "y": y, "dx": s / h, "dy": h})
+            xx += s / h
+        return out
+
+    @staticmethod
+    def _tm_leftover(sizes, x, y, dx, dy):
+        if dx >= dy:
+            w = sum(sizes) / dy
+            return (x + w, y, dx - w, dy)
+        h = sum(sizes) / dx
+        return (x, y + h, dx, dy - h)
+
+    def _tm_worst(self, sizes, x, y, dx, dy):
+        rects = self._tm_layout(sizes, x, y, dx, dy)
+        return max(max(r["dx"] / r["dy"], r["dy"] / r["dx"]) for r in rects if r["dy"] and r["dx"])
+
+    def _squarify(self, sizes, x, y, dx, dy):
+        """Return [{x,y,dx,dy}] packing `sizes` (already area-normalised, desc)
+        into the rect with near-square aspect ratios and NO gaps."""
+        sizes = [float(s) for s in sizes if s > 0]
+        if not sizes:
+            return []
+        if len(sizes) == 1:
+            return self._tm_layout(sizes, x, y, dx, dy)
+        i = 1
+        while i < len(sizes) and self._tm_worst(sizes[:i], x, y, dx, dy) >= self._tm_worst(sizes[:i + 1], x, y, dx, dy):
+            i += 1
+        current, remaining = sizes[:i], sizes[i:]
+        lx, ly, ldx, ldy = self._tm_leftover(current, x, y, dx, dy)
+        return self._tm_layout(current, x, y, dx, dy) + self._squarify(remaining, lx, ly, ldx, ldy)
+
+    @staticmethod
+    def _treemap_color(chg):
+        """Dark-canvas heatmap colour: neutral slate at 0, saturating to green
+        (up) or red (down) with the size of the move (capped at 3%)."""
+        if chg is None:
+            return "#2c313c"
+        t = max(0.0, min(1.0, abs(chg) / 3.0))
+        base = (58, 63, 74)
+        tgt = (22, 163, 74) if chg >= 0 else (220, 38, 38)
+        r = int(base[0] + (tgt[0] - base[0]) * t)
+        g = int(base[1] + (tgt[1] - base[1]) * t)
+        b = int(base[2] + (tgt[2] - base[2]) * t)
+        return f"rgb({r},{g},{b})"
+
     def _build_market_heatmap_all(self, stocks):
-        """One big whole-market heatmap: every stock in a single map, each tile
-        SIZED by market cap (bigger company = bigger tile) and COLOURED by
-        today's change vs yesterday's close. Shows the true shape of the NSE —
-        the few big caps dominate. Hover for details."""
+        """One big whole-market heatmap as a Finviz-style SQUARIFIED TREEMAP:
+        stocks grouped by sector, each tile SIZED by market cap and COLOURED by
+        today's move vs yesterday's close, tightly packed with no gaps.
+        Fails safe to a simple grid if anything goes wrong."""
+        try:
+            W, H = 1000.0, 620.0
+            bysec = {}
+            for s in stocks:
+                if s.get("market_cap"):
+                    bysec.setdefault(s.get("sector") or "Other", []).append(s)
+            if not bysec:
+                raise ValueError("no market caps")
+            sec_items = sorted(([sec, sum(x["market_cap"] for x in items), items]
+                                for sec, items in bysec.items()), key=lambda t: -t[1])
+            sec_rects = self._squarify(self._tm_normalize([t[1] for t in sec_items], W, H), 0, 0, W, H)
+
+            tiles, labels = "", ""
+            for (sec, total, items), R in zip(sec_items, sec_rects):
+                items = sorted(items, key=lambda x: -x["market_cap"])
+                label_h = 15.0 if (R["dy"] > 44 and R["dx"] > 60) else 0.0
+                srects = self._squarify(
+                    self._tm_normalize([x["market_cap"] for x in items], R["dx"], R["dy"] - label_h),
+                    R["x"], R["y"] + label_h, R["dx"], R["dy"] - label_h)
+                if label_h:
+                    labels += (f"<div class='tm-label' style='left:{R['x']/W*100:.3f}%;top:{R['y']/H*100:.3f}%;"
+                               f"width:{R['dx']/W*100:.3f}%;font-size:1.05cqw;'>{sec}</div>")
+                for s, r in zip(items, srects):
+                    wf, hf = r["dx"] / W, r["dy"] / H
+                    chg = s.get("change")
+                    col = self._treemap_color(chg)
+                    link = s.get("report_file") or "#"
+                    # font sizes in container-query width units so text scales with the tile
+                    f_sym = max(0.0, min(4.6, 20 * min(wf, 0.62 * hf)))
+                    show_sym = r["dx"] > 26 and r["dy"] > 16
+                    show_chg = r["dx"] > 40 and r["dy"] > 34
+                    inner = ""
+                    if show_sym:
+                        inner += f"<span class='tm-sym' style='font-size:{f_sym:.2f}cqw'>{s['symbol']}</span>"
+                    if show_chg and chg is not None:
+                        inner += f"<span class='tm-chg' style='font-size:{f_sym*0.62:.2f}cqw'>{chg:+.2f}%</span>"
+                    tiles += (f"<a href='{link}' class='tm-tile' "
+                              f"style='left:{r['x']/W*100:.3f}%;top:{r['y']/H*100:.3f}%;"
+                              f"width:{wf*100:.3f}%;height:{hf*100:.3f}%;background:{col}' "
+                              f"data-tip=\"{self._stock_tip(s)}\">{inner}</a>")
+            legend = ("<div class='heat-legend'>Tile size = market cap · colour = today's move vs yesterday: "
+                      "<i style='background:rgb(220,38,38)'></i><span>down</span>"
+                      "<i style='background:#2c313c'></i><span>flat</span>"
+                      "<i style='background:rgb(22,163,74)'></i><span>up</span>"
+                      "&nbsp;·&nbsp;brighter = bigger move · hover a tile for details.</div>")
+            return ("<div class='section'><h2>🗺️ Whole-market heatmap</h2>"
+                    "<p class='page-intro'>The entire NSE in one map, packed like a market treemap. Each tile is a "
+                    "stock, <strong>sized by market cap</strong> and grouped by sector, "
+                    "<strong>coloured by today's move vs yesterday's close</strong> (brighter = bigger move). This is "
+                    "the market's true shape — the giants (Safaricom, Equity, KCB, EABL…) dominate. Hover any tile "
+                    "for its price, previous close, signal and score; click to open the report.</p>"
+                    f"<div class='treemap'>{tiles}{labels}</div>{legend}</div>")
+        except Exception as e:
+            logger.warning(f"Treemap heatmap failed ({e}); using simple grid")
+            return self._build_heatmap_grid_fallback(stocks)
+
+    def _build_heatmap_grid_fallback(self, stocks):
+        """Simple cap-sized flex grid — used only if the treemap layout errors."""
         import math
         caps = [s.get("market_cap") for s in stocks if s.get("market_cap")]
         maxcap = max(caps) if caps else 1
-        # biggest companies first so the map reads large → small
         items = sorted(stocks, key=lambda s: (s.get("market_cap") or 0), reverse=True)
         tiles = ""
         for s in items:
             cap = s.get("market_cap") or 0
-            frac = math.sqrt(cap / maxcap) if (maxcap and cap > 0) else 0.0  # 0..1 (area ∝ cap)
-            side = int(58 + frac * (140 - 58))   # 58px … 140px square
-            fs = 0.60 + frac * 0.45              # font scales with size
+            frac = math.sqrt(cap / maxcap) if (maxcap and cap > 0) else 0.0
+            side = int(58 + frac * (140 - 58))
+            fs = 0.60 + frac * 0.45
             bg, fg = self._change_color(s.get("change"))
             chg = s.get("change")
             chgs = f"{chg:+.1f}%" if chg is not None else "—"
@@ -2424,19 +2553,9 @@ tr:hover { background: #f8fafc; }
                       f"data-tip=\"{self._stock_tip(s)}\">"
                       f"<span class='ht-sym' style='font-size:{fs:.2f}rem'>{s['symbol']}</span>"
                       f"<span class='ht-chg' style='font-size:{fs * 0.82:.2f}rem'>{chgs}</span></a>")
-        legend = ("<div class='heat-legend'>Tile size = market cap · colour = today's change vs yesterday: "
-                  "<i style='background:rgb(185,28,28)'></i>"
-                  "<i style='background:rgb(254,202,202)'></i><span>−4%+ · 0 ·</span>"
-                  "<i style='background:rgb(187,247,208)'></i>"
-                  "<i style='background:rgb(21,138,61)'></i><span>+4%+</span>"
-                  "&nbsp;·&nbsp;<i style='background:#cbd5e1'></i><span>no trade</span></div>")
         return ("<div class='section'><h2>🗺️ Whole-market heatmap</h2>"
-                "<p class='page-intro'>The entire NSE in one map. Each tile is a stock, "
-                "<strong>sized by market cap</strong> (bigger company = bigger tile) and "
-                "<strong>coloured by today's move vs yesterday's close</strong>. This is the market's true shape — "
-                "the handful of giants (Safaricom, Equity, KCB, EABL…) carry most of the weight. Hover any tile "
-                "for its price, previous close, signal and score; click to open the report.</p>"
-                f"<div class='heat-grid' style='align-items:flex-start'>{tiles}</div>{legend}</div>")
+                "<p class='page-intro'>Every stock sized by market cap, coloured by today's move.</p>"
+                f"<div class='heat-grid' style='align-items:flex-start'>{tiles}</div></div>")
 
     def _build_visuals_body(self, stocks):
         """The Visuals tab — all the charts moved off the (busy) Overview:
