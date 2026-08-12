@@ -1071,6 +1071,7 @@ ul {{ margin: 4px 0; padding-left: 18px; }} li {{ margin: 2px 0; }}
         ('sectors.html', '📊 Sectors'),
         ('foreign.html', '🌍 Foreign Flows'),
         ('pulse.html', '🧭 Market Pulse'),
+        ('bonds.html', '🏦 Govt Bonds'),
         ('quality.html', '✅ Data Quality'),
     ]
 
@@ -1736,6 +1737,421 @@ tr:hover { background: #f8fafc; }
                 'These are heuristics, not rules — every situation has exceptions.</p>'
                 f'<div class="explain-grid">{items}</div></div>')
 
+    # ==================================================================
+    # GOVERNMENT BONDS
+    # ==================================================================
+    _CBK_BONDS_URL = "https://www.centralbank.go.ke/bills-bonds/treasury-bonds/"
+    _CBK_BILLS_URL = "https://www.centralbank.go.ke/bills-bonds/treasury-bills/"
+    _DHOWCSD_URL = "https://www.centralbank.go.ke/dhow-csd/"
+    _BOND_WHT = 0.10  # withholding tax used ONLY for the tax-equivalent illustration
+
+    def _build_bonds_body(self, treasury=None):
+        """
+        Government Bonds page — Kenya Treasury bonds & bills from CBK, made
+        understandable: currently-open bonds, highest-yielding, a factual
+        "is it a good time?" snapshot, an all-bonds comparison and prices.
+
+        Everything here is DATA + neutral education from CBK's own figures.
+        It is explicitly NOT financial advice. Fails safe to an empty-state
+        message if CBK is unavailable — never invents a number.
+        """
+        try:
+            from treasury_securities import load_treasury
+            d = treasury or load_treasury(cache_dir="data", logger=logger)
+        except Exception as e:
+            logger.warning(f"Bonds page: loader failed: {e}")
+            d = {"as_of": "", "tbills": [], "bonds": [], "context": {}}
+
+        bonds = d.get("bonds") or []
+        tbills = d.get("tbills") or []
+        ctx = d.get("context") or {}
+        cbr = ctx.get("cbr")
+        as_of = d.get("as_of") or ""
+
+        def teq(c):
+            return c / (1 - self._BOND_WHT) if c else None
+
+        def net_yield(b):
+            """After-tax yield — the fair way to rank IFB vs FXD side by side.
+            IFB interest is tax-free, so its net = coupon. A normal bond loses
+            its withholding tax, so net = coupon x (1 - WHT). This is why a
+            higher-coupon FXD can still beat a tax-free IFB, or vice-versa."""
+            c = b.get("coupon")
+            if not c:
+                return None
+            if b.get("tax_free"):
+                return c
+            wht = (b.get("withholding_pct") or self._BOND_WHT * 100) / 100.0
+            return c * (1 - wht)
+
+        def green_shade(val, lo, hi):
+            """Background colour on a light→dark green scale (heatmap)."""
+            if val is None or hi <= lo:
+                return ("#dcfce7", "#166534")
+            t = max(0.0, min(1.0, (val - lo) / (hi - lo)))
+            r = int(220 + (21 - 220) * t)
+            g = int(252 + (128 - 252) * t)
+            b_ = int(231 + (61 - 231) * t)
+            fg = "#ffffff" if t > 0.55 else "#14532d"
+            return (f"rgb({r},{g},{b_})", fg)
+
+        def pct(v, dp=3):
+            return f"{v:.{dp}f}%" if v is not None else "—"
+
+        def money(v):
+            return f"KES {v:,.0f}" if v else "—"
+
+        openb = sorted([b for b in bonds if b.get("status") == "open" and b.get("coupon")],
+                       key=lambda b: b["coupon"], reverse=True)
+        upcoming = sorted([b for b in bonds if b.get("status") == "upcoming" and b.get("coupon")],
+                          key=lambda b: b["coupon"], reverse=True)
+        allb = sorted([b for b in bonds if b.get("coupon")],
+                      key=lambda b: b["coupon"], reverse=True)
+
+        # ---------- empty state (never fabricate) ----------
+        if not bonds and not tbills:
+            return ('<div class="section"><h2>🏦 Government Bonds — Kenya</h2>'
+                    '<p class="page-intro">Live Treasury data from the Central Bank of Kenya '
+                    'is temporarily unavailable (their site may be down). Nothing is shown rather '
+                    'than a guessed figure. Check the official source directly:</p>'
+                    f'<p><a href="{self._CBK_BONDS_URL}" target="_blank" rel="noopener" '
+                    'style="color:#3b82f6;font-weight:600;">CBK Treasury Bonds ↗</a> · '
+                    f'<a href="{self._CBK_BILLS_URL}" target="_blank" rel="noopener" '
+                    'style="color:#3b82f6;font-weight:600;">CBK Treasury Bills ↗</a></p></div>')
+
+        parts = []
+
+        # ---------- disclaimer ----------
+        parts.append(
+            '<div style="background:#fffbeb;border-left:6px solid #f59e0b;border-radius:8px;'
+            'padding:14px 18px;margin-bottom:18px;font-size:0.9rem;color:#78350f;">'
+            '⚠️ <strong>Educational information, not financial advice.</strong> These are factual '
+            'figures published by the Central Bank of Kenya, plus plain-English explanations to help '
+            'you understand them. I am not a licensed investment adviser. Always confirm the exact '
+            'terms on the official CBK prospectus, and consider your own goals (or a licensed adviser) '
+            'before investing.</div>')
+
+        # ---------- intro ----------
+        parts.append(
+            '<div class="section"><h2>🏦 Government Bonds — Kenya</h2>'
+            '<p class="page-intro">A government bond is a loan <em>you</em> make to the Government of '
+            'Kenya. In return it pays you interest (the <strong>coupon</strong>) every six months, then '
+            'returns your money on the <strong>maturity</strong> date. Because it is backed by the '
+            'government, it is the safest shilling investment there is — the trade-off is you tie your '
+            'money up for the bond\'s term. Data below is pulled live from the '
+            f'<a href="{self._CBK_BONDS_URL}" target="_blank" rel="noopener" style="color:#3b82f6;">'
+            'Central Bank of Kenya</a>'
+            + (f' · <strong>as of {as_of}</strong>' if as_of else '') + '.</p></div>')
+
+        # ---------- "Is it a good time?" — objective factors ----------
+        top_open = openb[0] if openb else None
+        top_any = allb[0] if allb else None
+        chips = []
+        if top_open and cbr is not None:
+            spread = top_open["coupon"] - cbr
+            cls = "cal-near" if spread > 0 else "cal-passed"
+            chips.append(
+                f'<div style="margin-bottom:10px;"><span class="cal-chip {cls}">Yields vs CBR</span> '
+                f'The best open bond pays <strong>{pct(top_open["coupon"],3)}</strong> — that is '
+                f'<strong>{spread:+.2f} percentage points</strong> versus the Central Bank Rate of '
+                f'{pct(cbr,2)}. A wide positive gap means bonds lock in a healthy premium over the '
+                f'central-bank benchmark.</div>')
+        ifb_open = [b for b in openb if b.get("tax_free")]
+        if ifb_open:
+            b = ifb_open[0]
+            chips.append(
+                f'<div style="margin-bottom:10px;"><span class="cal-chip cal-near">Tax-free option</span> '
+                f'An infrastructure bond (IFB) is currently open at <strong>{pct(b["coupon"],3)} tax-free</strong>. '
+                f'Because most bonds are taxed 10%, that is worth about <strong>{pct(teq(b["coupon"]),2)}</strong> '
+                f'on a taxable bond — a genuinely high effective yield.</div>')
+        infl = ctx.get("inflation_note")
+        if top_any:
+            chips.append(
+                f'<div style="margin-bottom:10px;"><span class="cal-chip cal-far">Real return</span> '
+                f'Your <em>real</em> return is the coupon minus inflation. The highest coupon on offer '
+                f'here is <strong>{pct(top_any["coupon"],3)}</strong>; compare it to the latest Kenyan '
+                f'inflation rate'
+                + (f' ({infl})' if infl else ' (see the Market Pulse tab)') +
+                ' to judge how much you truly earn after prices rise.</div>')
+        if chips:
+            parts.append(
+                '<div class="section"><h2>🧭 Is it a good time to buy? — the factors to weigh</h2>'
+                '<p class="page-intro">There is no single yes/no answer, and this is not advice. '
+                'Here are the objective signals from today\'s CBK data so you can judge for yourself:</p>'
+                + ''.join(chips) +
+                '<div class="dq-note">Rule of thumb people use: bond yields well above the CBR and '
+                'above inflation, on a bond whose term matches how long you can lock the money away, '
+                'is generally considered attractive. Longer bonds pay more but swing more in price if '
+                'you sell early. Your call.</div></div>')
+
+        # ---------- open now (cards, highest yield first) ----------
+        def bond_card(b, rank=None):
+            tf = b.get("tax_free")
+            badge = ('<span class="badge" style="background:#dcfce7;color:#166534;">TAX-FREE (IFB)</span>'
+                     if tf else
+                     f'<span class="badge" style="background:#dbeafe;color:#1e40af;">Taxed {pct(b.get("withholding_pct") or self._BOND_WHT*100,0)}</span>')
+            star = ('<span class="badge" style="background:#fef9c3;color:#854d0e;">★ Highest open yield</span>'
+                    if rank == 0 else '')
+            # closing urgency
+            ad = b.get("auction_date") or b.get("sale_end")
+            close_chip = ''
+            if ad:
+                try:
+                    from datetime import date as _date
+                    dd = _date.fromisoformat(ad)
+                    days = (dd - _date.fromisoformat(as_of)).days if as_of else None
+                    if days is not None:
+                        if days <= 0:
+                            close_chip = '<span class="bc-passed">closes today</span>'
+                        elif days <= 3:
+                            close_chip = f'<span class="bc-soon">closes in {days}d</span>'
+                        else:
+                            close_chip = f'<span class="bc-future">{days}d to bid</span>'
+                except Exception:
+                    pass
+            teq_txt = (f'<div style="font-size:0.78rem;color:#166534;margin-top:2px;">'
+                       f'≈ {pct(teq(b["coupon"]),2)} taxable-equivalent</div>' if tf and b.get("coupon") else '')
+            if b.get("dirty_price"):
+                price_txt = (f'💵 <strong>You pay ≈ KES {b["dirty_price"]:.2f}</strong> per 100 face value '
+                             f'(dirty price = clean {b["clean_price"]:.2f} + accrued interest '
+                             f'{b["accrued_interest"]:.2f}).')
+            elif b.get("clean_price"):
+                price_txt = (f'💵 Clean price ≈ <strong>KES {b["clean_price"]:.2f}</strong> per 100 '
+                             f'(you also pay accrued interest on top).')
+            else:
+                price_txt = '💵 Price is set at the auction (around KES 100 per 100 face value).'
+            link = (f'<a href="{b["prospectus_url"]}" target="_blank" rel="noopener" '
+                    f'style="color:#3b82f6;font-weight:600;">Official prospectus ↗</a>'
+                    if b.get("prospectus_url") else '')
+            mat = b.get("maturity") or "—"
+            tenor = f'{b["tenor_years"]:.1f} yrs' if b.get("tenor_years") else "—"
+            return (
+                '<div style="border:1px solid #e2e8f0;border-radius:12px;padding:16px 18px;'
+                'margin-bottom:12px;background:#fff;">'
+                f'<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;">'
+                f'<strong style="font-size:1.05rem;">{b["issue"]}</strong> '
+                f'<span style="color:#64748b;font-size:0.85rem;">{b.get("type_label","")}</span> '
+                f'{badge} {star} {close_chip}</div>'
+                f'<div style="display:flex;flex-wrap:wrap;gap:24px;align-items:flex-end;">'
+                f'<div><div style="font-size:1.9rem;font-weight:800;color:#16a34a;">{pct(b["coupon"],3)}</div>'
+                f'<div style="font-size:0.72rem;color:#64748b;text-transform:uppercase;">Coupon (yearly interest)</div>'
+                f'{teq_txt}</div>'
+                f'<div><div style="font-size:1.1rem;font-weight:700;">{tenor}</div>'
+                f'<div style="font-size:0.72rem;color:#64748b;text-transform:uppercase;">Term to maturity</div></div>'
+                f'<div><div style="font-size:1.1rem;font-weight:700;">{mat}</div>'
+                f'<div style="font-size:0.72rem;color:#64748b;text-transform:uppercase;">Matures</div></div>'
+                f'<div><div style="font-size:1.1rem;font-weight:700;">{money(b.get("min_invest"))}</div>'
+                f'<div style="font-size:0.72rem;color:#64748b;text-transform:uppercase;">Minimum</div></div>'
+                f'</div>'
+                f'<div class="dq-note">{price_txt} {link}</div>'
+                '</div>')
+
+        if openb:
+            cards = ''.join(bond_card(b, i) for i, b in enumerate(openb))
+            parts.append(
+                '<div class="section"><h2>🟢 Open now — bonds you can currently buy</h2>'
+                '<p class="page-intro">These bonds are on offer from CBK right now, '
+                '<strong>ranked highest-yielding first</strong>. Tax-free infrastructure bonds are '
+                'flagged in green.</p>'
+                '<div class="cal-legend"><span class="bc-future">days left to bid</span>'
+                '<span class="bc-soon">closing soon</span><span class="bc-passed">closes today</span></div>'
+                + cards + '</div>')
+        else:
+            nxt = ''
+            if upcoming:
+                nxt = ('<p>Coming up next: ' +
+                       ', '.join(f'<strong>{b["issue"]}</strong> ({pct(b["coupon"],3)})' for b in upcoming[:3]) +
+                       '.</p>')
+            parts.append(
+                '<div class="section"><h2>🟡 No bond is on primary offer right now</h2>'
+                '<p class="page-intro">CBK auctions new bonds roughly monthly; there isn\'t one in its '
+                'sale window today. You can still buy existing bonds on the secondary market through the '
+                'NSE or your bank, and Treasury bills below are auctioned weekly.</p>' + nxt + '</div>')
+
+        # ---------- top 10 by after-tax (net) return ----------
+        buyable = [b for b in bonds if b.get("coupon")]
+        ranked = sorted(buyable, key=lambda b: net_yield(b) or 0, reverse=True)[:10]
+        if ranked:
+            nys = [net_yield(b) for b in ranked if net_yield(b) is not None]
+            lo, hi = (min(nys), max(nys)) if nys else (0.0, 1.0)
+            medals = {0: "🥇", 1: "🥈", 2: "🥉"}
+            rrows = ''
+            for i, b in enumerate(ranked):
+                ny = net_yield(b)
+                bg, fg = green_shade(ny, lo, hi)
+                tf = b.get("tax_free")
+                taxbadge = ('<span class="badge" style="background:#dcfce7;color:#166534;">tax-free</span>'
+                            if tf else
+                            f'<span class="badge" style="background:#dbeafe;color:#1e40af;">{pct(b.get("withholding_pct") or self._BOND_WHT*100,0)} tax</span>')
+                st = b.get("status")
+                buyhow = ('🟢 at auction' if st == "open" else
+                          '🟡 upcoming' if st == "upcoming" else '⚪ secondary market')
+                price = (f'{b["clean_price"]:.2f} / {b["dirty_price"]:.2f}' if b.get("dirty_price")
+                         else (f'{b["clean_price"]:.2f} / —' if b.get("clean_price") else '— / —'))
+                rrows += (
+                    f'<tr><td style="text-align:center;font-size:1rem;font-weight:700;">{medals.get(i, i + 1)}</td>'
+                    f'<td><strong>{b["issue"]}</strong><br>'
+                    f'<span style="font-size:0.72rem;color:#64748b;">{b.get("type_label","")}</span></td>'
+                    f'<td>{taxbadge}</td>'
+                    f'<td style="text-align:right;">{pct(b["coupon"],3)}</td>'
+                    f'<td style="text-align:right;font-weight:800;background:{bg};color:{fg};border-radius:6px;">{pct(ny,3)}</td>'
+                    f'<td style="text-align:right;">{(str(round(b["tenor_years"],1))+"y") if b.get("tenor_years") else "—"}</td>'
+                    f'<td style="text-align:right;">{price}</td>'
+                    f'<td style="font-size:0.8rem;">{buyhow}</td></tr>')
+            parts.append(
+                '<div class="section"><h2>🏆 Top 10 bonds by return (best → lowest)</h2>'
+                '<p class="page-intro">Ranked by <strong>net yield — what you actually keep after tax</strong> — '
+                'so tax-free infrastructure bonds and normal FXD bonds compete on a level field. This is the honest '
+                'comparison: a higher-coupon FXD can out-earn a tax-free IFB once tax is taken off, or the other way '
+                'round. <strong>Greener = higher net return.</strong> Price shows clean / dirty per 100 face value.</p>'
+                '<div class="table-wrap"><table><thead><tr>'
+                '<th style="text-align:center;">#</th><th>Bond</th><th>Tax</th>'
+                '<th style="text-align:right;">Coupon</th><th style="text-align:right;">Net yield ★</th>'
+                '<th style="text-align:right;">Tenor</th><th style="text-align:right;">Clean/Dirty</th><th>Buy via</th>'
+                f'</tr></thead><tbody>{rrows}</tbody></table></div>'
+                '<div class="dq-note">★ <strong>Net yield</strong> = coupon for tax-free IFBs; coupon × (1 − withholding '
+                'tax) for normal bonds (WHT is 10% on 10-year+ bonds, 15% on shorter ones). <strong>Open</strong> bonds '
+                'you buy at the CBK auction; <strong>closed</strong> bonds you buy on the secondary market (NSE / your '
+                'bank) at the day\'s price. This ranking is factual data, not a recommendation.</div></div>')
+
+        # ---------- T-bills ----------
+        if tbills:
+            tcards = ''
+            for t in tbills:
+                tcards += (
+                    '<div class="stat-card">'
+                    f'<div class="stat-value">{pct(t["rate"],3)}</div>'
+                    f'<div class="stat-label">{t["label"]} bill</div>'
+                    f'<div style="font-size:0.7rem;color:#94a3b8;margin-top:4px;">issue {t.get("issue") or "—"}</div>'
+                    '</div>')
+            parts.append(
+                '<div class="section"><h2>💵 Treasury bills — the short-term option</h2>'
+                '<p class="page-intro">Treasury bills are the same idea as bonds but short-term '
+                '(under a year) and auctioned <strong>every week</strong>. Instead of paying a coupon, '
+                'they are sold at a discount and repaid at full value — the difference is your interest. '
+                'These are the latest weighted-average rates from CBK:</p>'
+                f'<div class="stats">{tcards}</div>'
+                '<div class="dq-note">Good if you may need the money back within a year. '
+                f'Full auction details: <a href="{self._CBK_BILLS_URL}" target="_blank" rel="noopener" '
+                'style="color:#3b82f6;">CBK Treasury Bills ↗</a></div></div>')
+
+        # ---------- compare all bonds (IFB + FXD, ranked by net yield) ----------
+        if allb:
+            allb_net = sorted(allb, key=lambda b: net_yield(b) or 0, reverse=True)
+            nys_all = [net_yield(b) for b in allb_net if net_yield(b) is not None]
+            nlo, nhi = (min(nys_all), max(nys_all)) if nys_all else (0.0, 1.0)
+            rows = ''
+            for i, b in enumerate(allb_net):
+                st = b.get("status")
+                stchip = ('<span class="cal-chip cal-near">open</span>' if st == "open" else
+                          '<span class="cal-chip cal-far">upcoming</span>' if st == "upcoming" else
+                          '<span class="cal-chip" style="background:#e2e8f0;color:#475569;">closed</span>')
+                tf = b.get("tax_free")
+                taxcell = ('<span style="color:#166534;font-weight:600;">Tax-free</span>' if tf
+                           else f'{pct(b.get("withholding_pct") or self._BOND_WHT*100,0)} tax')
+                ny = net_yield(b)
+                bg, fg = green_shade(ny, nlo, nhi)
+                price = (f'{b["clean_price"]:.2f} / {b["dirty_price"]:.2f}' if b.get("dirty_price")
+                         else (f'{b["clean_price"]:.2f} / —' if b.get("clean_price") else '—'))
+                rows += (
+                    f'<tr><td><strong>{b["issue"]}</strong>'
+                    + (' <span class="badge" style="background:#fef9c3;color:#854d0e;">★</span>' if i == 0 else '') +
+                    f'</td><td>{b.get("type_label","")}</td><td>{taxcell}</td>'
+                    f'<td style="text-align:right;font-weight:700;color:#16a34a;">{pct(b["coupon"],3)}</td>'
+                    f'<td style="text-align:right;font-weight:800;background:{bg};color:{fg};border-radius:6px;">{pct(ny,3)}</td>'
+                    f'<td style="text-align:right;">{(str(round(b["tenor_years"],1))+"y") if b.get("tenor_years") else "—"}</td>'
+                    f'<td>{b.get("maturity") or "—"}</td>'
+                    f'<td style="text-align:right;">{price}</td>'
+                    f'<td>{stchip}</td></tr>')
+            parts.append(
+                '<div class="section"><h2>📊 Compare all recent bonds (IFB + FXD together)</h2>'
+                '<p class="page-intro">Every recent CBK bond — infrastructure (IFB) <em>and</em> fixed-coupon '
+                '(FXD), open and closed — <strong>ranked by net yield (what you keep after tax)</strong> so they '
+                'compete on a level field. <strong>Greener net yield = higher take-home return.</strong> '
+                '"Clean/Dirty" is the price per 100 face value (dirty = what you actually pay).</p>'
+                '<div class="table-wrap"><table><thead><tr>'
+                '<th>Issue</th><th>Type</th><th>Tax</th><th style="text-align:right;">Coupon</th>'
+                '<th style="text-align:right;">Net yield</th><th style="text-align:right;">Tenor</th>'
+                '<th>Matures</th><th style="text-align:right;">Clean/Dirty</th><th>Status</th>'
+                f'</tr></thead><tbody>{rows}</tbody></table></div>'
+                '<div class="dq-note">Closed bonds can still be bought on the secondary market (NSE / your '
+                'bank) at the going market price, which moves daily — the coupon shown is fixed for the '
+                'bond\'s life. Net yield = coupon for tax-free IFBs, coupon × (1 − WHT) for taxed bonds.</div></div>')
+
+        # ---------- summary: what's available to buy ----------
+        summ = []
+        if openb:
+            top = openb[0]
+            tline = (f'<li><strong>Highest-yielding open bond:</strong> {top["issue"]} at '
+                     f'<strong>{pct(top["coupon"],3)}</strong>')
+            tline += ' (tax-free)' if top.get("tax_free") else ''
+            tline += f', {top["tenor_years"]:.0f}-year term.' if top.get("tenor_years") else '.'
+            tline += '</li>'
+            summ.append(tline)
+            if ifb_open:
+                b = ifb_open[0]
+                summ.append(
+                    f'<li><strong>Best tax-free option:</strong> {b["issue"]} at {pct(b["coupon"],3)} '
+                    f'tax-free (≈ {pct(teq(b["coupon"]),2)} before-tax equivalent).</li>')
+            summ.append(f'<li><strong>{len(openb)} bond(s)</strong> are open for bidding right now.</li>')
+        else:
+            summ.append('<li>No bonds are on primary offer today — T-bills are auctioned weekly, and '
+                        'existing bonds trade on the secondary market.</li>')
+        if tbills:
+            best_t = max(tbills, key=lambda t: t["rate"])
+            summ.append(f'<li><strong>Best short-term rate:</strong> {best_t["label"]} T-bill at '
+                        f'{pct(best_t["rate"],3)}.</li>')
+        parts.append(
+            '<div class="section"><h2>📝 Summary — what you can buy now</h2>'
+            f'<ul style="line-height:1.9;margin:0 0 10px 18px;">{"".join(summ)}</ul>'
+            '<div style="background:#eff6ff;border-radius:8px;padding:12px 16px;font-size:0.88rem;color:#1e3a8a;">'
+            '<strong>How to buy:</strong> open a CBK <strong>DhowCSD</strong> account '
+            f'(<a href="{self._DHOWCSD_URL}" target="_blank" rel="noopener" style="color:#2563eb;">'
+            'dhow-csd ↗</a>) online or via your bank, then place a bid before the auction date. '
+            'Minimum is usually KES 50,000 for bonds and KES 100,000 for infrastructure bonds.</div>'
+            '<div class="dq-note">This is a factual summary of available securities — not a recommendation '
+            'to buy any specific bond.</div></div>')
+
+        # ---------- glossary ----------
+        parts.append(self._bonds_glossary())
+        return ''.join(parts)
+
+    def _bonds_glossary(self):
+        """Plain-English guide to bonds — ELI10 style, with examples."""
+        cards = [
+            ("Coupon",
+             "The fixed yearly interest a bond pays you, as a % of the face value, usually split into two payments a year.",
+             "A 12% coupon on KES 100,000 pays you KES 12,000 a year — KES 6,000 every six months."),
+            ("Yield vs coupon",
+             "The coupon is fixed. The yield is what you actually earn based on the price you pay. Buy below face value and your yield is higher than the coupon; buy above and it's lower.",
+             "A 12% coupon bond bought at 96 (below 100) yields a bit more than 12%."),
+            ("Tenor / maturity",
+             "Tenor is how long until the bond repays you (its term). The maturity date is the day you get your money back.",
+             "A bond maturing 18-Aug-2042 with '16 years to maturity' repays your capital in 2042."),
+            ("Infrastructure Bond (IFB) — tax-free",
+             "A special bond funding roads, energy, water etc. Its interest is 100% tax-free, unlike normal bonds which are taxed 10–15%.",
+             "A 12.7% tax-free IFB beats a 13.5% normal bond after tax: 13.5% − 10% tax ≈ 12.15% net."),
+            ("Clean vs dirty price",
+             "The clean price is the bond's value per 100 face value. The dirty price is what you actually pay — clean price plus interest that has built up since the last payment (accrued interest).",
+             "Clean 99.96 + accrued 3.84 = you pay ≈ 103.80 per 100 of the bond."),
+            ("Primary vs secondary market",
+             "Primary = buying a brand-new bond straight from CBK at auction. Secondary = buying an existing bond from someone else (via the NSE or a bank), at the going market price.",
+             "Missed the auction? You can still buy that bond on the secondary market — the price just floats."),
+            ("Real return",
+             "Your return after subtracting inflation — what your money truly gains in buying power.",
+             "A 12% bond when inflation is 7% gives a ~5% real return. If inflation were 13%, you'd be losing ground."),
+            ("Why bond prices move",
+             "When new bonds offer higher interest, older lower-interest bonds become worth less (and vice-versa). It only matters if you sell before maturity — hold to maturity and you get face value back.",
+             "Rates rise after you buy → if you sell early you may get less than you paid; hold to maturity and you still get 100 back."),
+        ]
+        items = ''
+        for title, what, eg in cards:
+            items += (f'<div class="explain-card"><h4>{title}</h4><p>{what}</p>'
+                      f'<p class="eg">📌 <strong>Example:</strong> {eg}</p></div>')
+        return ('<div class="section"><h2>📖 Bonds explained (plain English)</h2>'
+                '<p class="page-intro">Everything on this page, in simple terms with examples.</p>'
+                f'<div class="explain-grid">{items}</div></div>')
+
     def _build_dashboard_pages(self, stocks, gainers, losers, sectors, breadth,
                                sector_chart, bullish, bearish, neutral, total,
                                data_date=None, alerts=None, usd_kes=None):
@@ -2131,6 +2547,9 @@ tr:hover { background: #f8fafc; }
             )
         )
 
+        # ---- GOVERNMENT BONDS page (CBK Treasury bonds + bills) ----
+        bonds_body = self._build_bonds_body()
+
         # ---- Assemble & write all pages ----
         pages = {
             'index.html': self._page_shell('NSE Dashboard — Overview', 'index.html', subtitle, overview_body, with_filter=True),
@@ -2141,6 +2560,7 @@ tr:hover { background: #f8fafc; }
             'sectors.html': self._page_shell('NSE — Sectors', 'sectors.html', subtitle, sectors_body),
             'foreign.html': self._page_shell('NSE — Foreign Flows', 'foreign.html', subtitle, foreign_body),
             'pulse.html': self._page_shell('NSE — Market Pulse', 'pulse.html', subtitle, pulse_body),
+            'bonds.html': self._page_shell('NSE — Government Bonds', 'bonds.html', subtitle, bonds_body),
             'quality.html': self._page_shell('NSE — Data Quality', 'quality.html', subtitle, quality_body),
         }
         for filename, html in pages.items():
