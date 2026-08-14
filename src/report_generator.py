@@ -1080,6 +1080,19 @@ ul {{ margin: 4px 0; padding-left: 18px; }} li {{ margin: 2px 0; }}
         ('quality.html', '✅ Data Quality'),
     ]
 
+    # Inline SVG favicon — an ascending green bar chart on a dark tile (a
+    # "graph"). Self-contained data URI, so no external file is needed.
+    _FAVICON = (
+        "<link rel=\"icon\" href=\"data:image/svg+xml,"
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
+        "<rect width='32' height='32' rx='7' fill='%230f172a'/>"
+        "<rect x='6' y='17' width='5' height='9' rx='1.2' fill='%2322c55e'/>"
+        "<rect x='13.5' y='11' width='5' height='15' rx='1.2' fill='%2338bd7a'/>"
+        "<rect x='21' y='6' width='5' height='20' rx='1.2' fill='%234ade80'/>"
+        "<path d='M7 15.5 L16 10 L25 5.5' fill='none' stroke='%23bbf7d0' "
+        "stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/>"
+        "</svg>\">")
+
     def _dashboard_css(self):
         """Shared stylesheet for all dashboard pages (plain string)."""
         return """<style>
@@ -1311,6 +1324,7 @@ tr:hover { background: #f8fafc; }
         return (
             '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
+            + self._FAVICON +
             f'<title>{page_title}</title>' + self._dashboard_css() + '</head><body>'
             '<div class="container">'
             '<div class="topbar">'
