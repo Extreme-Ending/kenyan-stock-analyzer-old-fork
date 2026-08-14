@@ -1127,6 +1127,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #e2e8f0; white-space: nowrap; }
 th { background: #f8fafc; color: #64748b; font-size: 0.7rem; text-transform: uppercase; font-weight: 600; position: sticky; top: 0; }
+th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+th.sortable:hover { color: #3b82f6; }
+th.sortable::after { content: '⇅'; opacity: 0.3; margin-left: 4px; }
+th.sortable.sort-asc::after { content: '▲'; opacity: 0.85; color: #3b82f6; }
+th.sortable.sort-desc::after { content: '▼'; opacity: 0.85; color: #3b82f6; }
 tr:hover { background: #f8fafc; }
 .stock-link { color: #3b82f6; text-decoration: none; font-weight: 600; }
 .stock-link:hover { text-decoration: underline; }
@@ -1320,7 +1325,27 @@ tr:hover { background: #f8fafc; }
             "var tb=document.querySelector('.topbar');"
             "if(tb){window.addEventListener('scroll',function(){tb.classList.toggle('stuck',window.scrollY>8);});}"
             "})();")
-        js = f"<script>{filter_js}{tip_js}</script>"
+        # Click-to-sort for tables (asc/desc toggle). Reorders rows only —
+        # never touches the values. Numeric, text and signal-rank columns.
+        sort_js = (
+            "function scv(cell,type){if(!cell)return type==='number'?-Infinity:'';"
+            "var t=(cell.textContent||'').trim();"
+            "if(type==='signal'){var m={'strong buy':5,'buy':4,'neutral':3,'hold':3,'sell':2,'strong sell':1};"
+            "return m[t.toLowerCase()]!==undefined?m[t.toLowerCase()]:0;}"
+            "if(type==='number'){var n=parseFloat(t.replace(/[^0-9.-]/g,''));return isNaN(n)?-Infinity:n;}"
+            "if(type==='text')return t.toLowerCase();"
+            "var a=parseFloat(t.replace(/[^0-9.-]/g,''));return isNaN(a)?t.toLowerCase():a;}"
+            "function sortTable(th){var tbl=th.closest('table'),tb=tbl.tBodies[0];"
+            "var idx=Array.prototype.indexOf.call(th.parentNode.children,th);"
+            "var type=th.getAttribute('data-sort-type')||'auto';"
+            "var asc=th.getAttribute('data-asc')!=='1';var hs=th.parentNode.children;"
+            "for(var i=0;i<hs.length;i++){hs[i].removeAttribute('data-asc');hs[i].classList.remove('sort-asc','sort-desc');}"
+            "th.setAttribute('data-asc',asc?'1':'0');th.classList.add(asc?'sort-asc':'sort-desc');"
+            "var rows=Array.prototype.slice.call(tb.rows);"
+            "rows.sort(function(a,b){var x=scv(a.cells[idx],type),y=scv(b.cells[idx],type);"
+            "if(x<y)return asc?-1:1;if(x>y)return asc?1:-1;return 0;});"
+            "rows.forEach(function(r){tb.appendChild(r);});}")
+        js = f"<script>{filter_js}{tip_js}{sort_js}</script>"
         return (
             '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
@@ -2685,11 +2710,17 @@ tr:hover { background: #f8fafc; }
             + movers_html +
             '<div class="section"><h2>📋 All Stocks — Signal &amp; Score</h2>'
             '<p class="dq-note" style="margin-bottom:12px;">💡 Hover a stock symbol or its score for a preview — '
-            'price, today-vs-yesterday, signal and the full factor breakdown behind the score.</p>'
+            'price, today-vs-yesterday, signal and the full factor breakdown behind the score. '
+            '<strong>Click any column header to sort</strong> (click again to reverse).</p>'
             + search_bar +
             '<div class="table-wrap"><table id="mainTable"><thead><tr>'
-            '<th>Symbol</th><th title="TradingView Buy/Sell rating">TV Signal</th><th>Price</th>'
-            '<th>Change</th><th title="0-100 factor screen — hover a score for the breakdown">Score</th>'
+            '<th class="sortable" data-sort-type="text" onclick="sortTable(this)">Symbol</th>'
+            '<th class="sortable" data-sort-type="signal" onclick="sortTable(this)" '
+            'title="TradingView Buy/Sell rating — sorts Strong Buy → Strong Sell">TV Signal</th>'
+            '<th class="sortable" data-sort-type="number" onclick="sortTable(this)">Price</th>'
+            '<th class="sortable" data-sort-type="number" onclick="sortTable(this)">Change</th>'
+            '<th class="sortable" data-sort-type="number" onclick="sortTable(this)" '
+            'title="0-100 factor screen — hover a score for the breakdown">Score</th>'
             f'</tr></thead><tbody>{ov_rows}</tbody></table></div></div>')
 
         # ---- TECHNICALS page ----
