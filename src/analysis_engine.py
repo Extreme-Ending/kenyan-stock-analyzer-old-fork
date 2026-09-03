@@ -393,7 +393,15 @@ class AnalysisEngine:
         else:
             signals['volume'] = 'undefined'
 
-        # 8. Overall summary signal
+        # 8. Overall summary signal -- a majority vote of ma_crossover/macd/
+        # trend only. RSI deliberately does NOT feed into this (see
+        # IMPROVEMENTS.txt item 4): it used to break exact ties here, which
+        # meant scoring.py's _score_momentum() could double-count RSI --
+        # once via this `overall` signal, once as its own separate raw-RSI
+        # input. RSI already has its own dedicated, more granular role in
+        # the momentum score; a genuine 3-way tie among these signals is a
+        # real "no clear direction" case and should say so, not borrow a
+        # tiebreak from a different indicator.
         bullish_count = sum(
             1 for s in [
                 signals['ma_crossover'], signals['macd'], signals['trend']
@@ -408,10 +416,6 @@ class AnalysisEngine:
             signals['overall'] = 'bullish'
         elif bearish_count > bullish_count:
             signals['overall'] = 'bearish'
-        elif signals['rsi'] == 'overbought':
-            signals['overall'] = 'bearish'
-        elif signals['rsi'] == 'oversold':
-            signals['overall'] = 'bullish'
         else:
             signals['overall'] = 'neutral'
 

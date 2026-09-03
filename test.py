@@ -276,6 +276,33 @@ class TestAnalysisEngine(unittest.TestCase):
         for name, value in signals.items():
             self.assertIn(value, valid, f"Invalid signal '{value}' for '{name}'")
 
+    def test_overall_signal_tie_is_neutral_regardless_of_rsi(self):
+        """IMPROVEMENTS.txt item 4: RSI must no longer break a tie among
+        ma_crossover/macd/trend for `overall` -- that coupling let
+        scoring.py's _score_momentum() double-count RSI (once via
+        `overall`, once as its own raw-RSI input). A genuine tie (one
+        bullish, one bearish, one undefined) must land on 'neutral' even
+        with an extreme RSI on either side, not flip with it."""
+        df = pd.DataFrame({
+            'sma_20': [104, 105], 'sma_50': [100, 100],
+            'close': [96, 95],
+            'macd': [np.nan, np.nan], 'macd_signal': [np.nan, np.nan],
+            'bb_upper': [110, 110], 'bb_lower': [90, 90],
+            'stoch_k': [50, 50], 'volume': [1000, 1000], 'volume_sma_20': [1000, 1000],
+            'rsi': [80, 85],  # overbought -- old code would have forced 'bearish'
+        })
+        signals = self.engine._generate_signals(df)
+        self.assertEqual(signals['ma_crossover'], 'bullish')
+        self.assertEqual(signals['trend'], 'bearish')
+        self.assertEqual(signals['macd'], 'undefined')
+        self.assertEqual(signals['rsi'], 'overbought')
+        self.assertEqual(signals['overall'], 'neutral')
+
+        df['rsi'] = [25, 20]  # oversold -- old code would have forced 'bullish'
+        signals = self.engine._generate_signals(df)
+        self.assertEqual(signals['rsi'], 'oversold')
+        self.assertEqual(signals['overall'], 'neutral')
+
     def test_support_resistance(self):
         supports = self.result.get('support', [])
         resistances = self.result.get('resistance', [])
@@ -694,6 +721,81 @@ class TestBacktest(unittest.TestCase):
         self.assertIn('factor_correlation', summary['horizons'][5])
 
 
+class TestFundamentalAnalysis(unittest.TestCase):
+    """Test the fundamentals sanity/bounds check (IMPROVEMENTS.txt item 6).
+    Pure computation over synthetic dicts -- no network."""
+
+    def test_plausible_data_untouched(self):
+        from fundamental_analysis import sanity_check_fundamentals
+        fund = {'revenue_ttm': 5_000_000, 'market_cap': 50_000_000,
+               'dividend_yield': 4.5, 'current_ratio': 1.8, 'roe': 22.0,
+               'eps_ttm': 3.5, 'net_income_ttm': 1_200_000}
+        original = dict(fund)
+        flags = sanity_check_fundamentals(fund)
+        self.assertEqual(flags, [])
+        self.assertEqual(fund, original)
+        self.assertNotIn('_sanity_flags', fund)
+
+    def test_rejects_negative_revenue(self):
+        from fundamental_analysis import sanity_check_fundamentals
+        fund = {'revenue_ttm': -100}
+        flags = sanity_check_fundamentals(fund)
+        self.assertIsNone(fund['revenue_ttm'])
+        self.assertEqual(len(flags), 1)
+
+    def test_rejects_negative_market_cap_yield_current_ratio(self):
+        from fundamental_analysis import sanity_check_fundamentals
+        fund = {'market_cap': -1, 'dividend_yield': -2.0, 'current_ratio': -0.5}
+        flags = sanity_check_fundamentals(fund)
+        self.assertIsNone(fund['market_cap'])
+        self.assertIsNone(fund['dividend_yield'])
+        self.assertIsNone(fund['current_ratio'])
+        self.assertEqual(len(flags), 3)
+
+    def test_rejects_implausible_roe(self):
+        from fundamental_analysis import sanity_check_fundamentals
+        fund = {'roe': 450.0}
+        flags = sanity_check_fundamentals(fund)
+        self.assertIsNone(fund['roe'])
+        self.assertEqual(len(flags), 1)
+
+    def test_plausible_roe_not_rejected(self):
+        from fundamental_analysis import sanity_check_fundamentals
+        fund = {'roe': -60.0}  # a real, if bad, ROE -- well within bounds
+        flags = sanity_check_fundamentals(fund)
+        self.assertEqual(fund['roe'], -60.0)
+        self.assertEqual(flags, [])
+
+    def test_rejects_eps_net_income_sign_mismatch(self):
+        from fundamental_analysis import sanity_check_fundamentals
+        fund = {'eps_ttm': 2.5, 'net_income_ttm': -500_000}
+        flags = sanity_check_fundamentals(fund)
+        self.assertIsNone(fund['eps_ttm'])
+        self.assertIsNone(fund['net_income_ttm'])
+        self.assertEqual(len(flags), 2)
+
+    def test_agreeing_signs_not_rejected(self):
+        from fundamental_analysis import sanity_check_fundamentals
+        fund = {'eps_ttm': -1.2, 'net_income_ttm': -300_000}  # both negative -- consistent
+        flags = sanity_check_fundamentals(fund)
+        self.assertEqual(fund['eps_ttm'], -1.2)
+        self.assertEqual(fund['net_income_ttm'], -300_000)
+        self.assertEqual(flags, [])
+
+    def test_zero_values_do_not_false_trigger_sign_check(self):
+        """0 is neither positive nor negative -- must not be treated as a
+        sign mismatch against a nonzero value on the other field."""
+        from fundamental_analysis import sanity_check_fundamentals
+        fund = {'eps_ttm': 0, 'net_income_ttm': 500_000}
+        flags = sanity_check_fundamentals(fund)
+        self.assertEqual(flags, [])
+
+    def test_missing_fields_skipped_gracefully(self):
+        from fundamental_analysis import sanity_check_fundamentals
+        flags = sanity_check_fundamentals({})
+        self.assertEqual(flags, [])
+
+
 class TestPriceValidation(unittest.TestCase):
     """Test price validation: liquidity-scaled thresholds and the NSE-PDF
     fallback reference source (IMPROVEMENTS.txt item 5). Never hits afx.
@@ -1021,6 +1123,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestScoring))
     suite.addTests(loader.loadTestsFromTestCase(TestHistoryTracker))
     suite.addTests(loader.loadTestsFromTestCase(TestBacktest))
+    suite.addTests(loader.loadTestsFromTestCase(TestFundamentalAnalysis))
     suite.addTests(loader.loadTestsFromTestCase(TestPriceValidation))
     suite.addTests(loader.loadTestsFromTestCase(TestReportGenerator))
     suite.addTests(loader.loadTestsFromTestCase(TestEmailNotifier))

@@ -163,6 +163,62 @@ SECTOR_DISPLAY = {
 }
 
 
+def sanity_check_fundamentals(fund):
+    """
+    Reject fundamental fields that are internally implausible or
+    contradictory before they ever reach scoring (see IMPROVEMENTS.txt
+    item 6) — a single bad/stale TradingView field otherwise flows
+    straight into the score with no check at all. Mutates `fund` in
+    place: the offending field(s) are set to None (already rendered as
+    "n/a"/"—" everywhere else in this codebase for missing data), never
+    guessed or "corrected" to some plausible-looking value.
+
+    Checks:
+      - revenue_ttm, market_cap, dividend_yield, current_ratio negative:
+        all physically impossible.
+      - abs(roe) > 300%: implausible for any NSE-listed company, even a
+        distressed one with thin equity.
+      - eps_ttm and net_income_ttm disagree in sign: EPS is derived from
+        net income / shares outstanding, so a profitable EPS alongside a
+        lossmaking net income (or vice versa) is an internal
+        contradiction, not two independently-plausible numbers — since
+        there's no way to tell which one is wrong, neither is trusted.
+
+    Args:
+        fund: One stock's fundamentals dict (from fetch_all_fundamentals).
+
+    Returns:
+        list[str]: one short note per field rejected, for transparency
+        (empty if everything passed). Also stored on fund['_sanity_flags'].
+    """
+    flags = []
+
+    def reject(field, reason):
+        fund[field] = None
+        flags.append(f"{field}: {reason}")
+
+    for field, label in (("revenue_ttm", "revenue"), ("market_cap", "market cap"),
+                        ("dividend_yield", "dividend yield"), ("current_ratio", "current ratio")):
+        value = fund.get(field)
+        if value is not None and value < 0:
+            reject(field, f"negative {label} is not possible")
+
+    roe = fund.get("roe")
+    if roe is not None and abs(roe) > 300:
+        reject("roe", f"{roe:.0f}% is implausible even for a distressed company")
+
+    eps = fund.get("eps_ttm")
+    net_income = fund.get("net_income_ttm")
+    if eps is not None and net_income is not None and eps != 0 and net_income != 0:
+        if (eps > 0) != (net_income > 0):
+            reject("eps_ttm", f"sign contradicts net_income_ttm ({net_income:,.0f})")
+            reject("net_income_ttm", f"sign contradicts eps_ttm ({eps:.2f})")
+
+    if flags:
+        fund["_sanity_flags"] = flags
+    return flags
+
+
 class FundamentalAnalysis:
     """Fetches and structures fundamental data from TradingView."""
 
@@ -390,12 +446,20 @@ class FundamentalAnalysis:
                         "_data_source": "TradingView",
                     }
 
+                    sanity_check_fundamentals(fundamentals)
                     data[symbol] = fundamentals
 
                 except Exception as e:
                     logger.warning(f"Error parsing fundamental data for {getattr(stock, 'name', '?')}: {e}")
                     continue
 
+            flagged = sum(1 for f in data.values() if f.get("_sanity_flags"))
+            if flagged:
+                logger.warning(
+                    f"Fundamentals sanity check: {flagged}/{len(data)} stock(s) had "
+                    f"an implausible/contradictory field rejected (see each stock's "
+                    f"_sanity_flags)"
+                )
             return data
 
     def get_fundamentals_for_symbol(self, symbol: str, all_data: dict) -> dict:

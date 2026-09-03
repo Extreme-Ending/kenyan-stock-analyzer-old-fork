@@ -117,6 +117,30 @@ decorrelate the inputs (e.g. drop raw RSI from momentum score since it's
 already baked into `overall`) or explicitly account for the correlation
 when calibrating weights (#3).
 
+STATUS (2026-09-04): Done. Audit finding: `overall` is a majority vote
+of ma_crossover/macd/trend only -- RSI's actual role was narrower than
+this item's own "Current" description suggested (not a primary
+component), but it DID break exact ties among those three (1 bullish,
+1 bearish, 1 undefined), and that's precisely the correlation the item
+flagged: scoring.py's _score_momentum() separately uses `overall` AND
+raw RSI as two of its three inputs, so on a tie day RSI was silently
+counted twice. Fix: analysis_engine.py's _generate_signals() no longer
+uses RSI to break that tie -- a genuine 3-way split now correctly
+reports 'neutral' (a real "no clear direction" outcome) instead of
+borrowing a tiebreak from a different indicator. Chose this over the
+spec's other option (dropping RSI from _score_momentum entirely) since
+the audit showed RSI's overlap with `overall` was narrow (tie-only), so
+removing it from the momentum score outright would have thrown away
+real, mostly-independent signal to fix a much smaller problem than
+assumed. `_score_momentum` itself is unchanged. 1 new test constructing
+an exact tie with an extreme RSI on each side, confirming 'neutral'
+where the old code would have flipped it. Verified against the full
+57-stock real universe: 0 ties in today's snapshot (the fix doesn't
+change today's classifications, since the market is trending clearly
+enough right now that no stock hits the exact-tie case) -- ready for
+when a tie does occur, rather than a change that happened to be
+visible today.
+
 
 5. PRICE VALIDATION IS SINGLE-SOURCE WITH A STATIC DISAGREEMENT THRESHOLD
 --------------------------------------------------------------
@@ -180,6 +204,37 @@ direction). Where feasible, cross-check against the NSE dividend/earnings
 calendars already scraped in src/dividend_calendar.py and
 src/earnings_calendar.py, following the same verified/corrected/
 uncross-checked pattern already used for dividends.
+
+STATUS (2026-09-04): Done (bounds/sanity half; calendar cross-check
+wasn't feasible for earnings -- see below). New
+fundamental_analysis.sanity_check_fundamentals(): rejects (sets to None,
+same as any other missing field everywhere else in this codebase) any
+of revenue_ttm/market_cap/dividend_yield/current_ratio that are negative
+(physically impossible), |roe| > 300% (implausible for any NSE-listed
+company), and eps_ttm/net_income_ttm when their signs disagree (EPS is
+derived from net income / shares, so a profitable EPS alongside a
+lossmaking net income is an internal contradiction -- neither field is
+trusted once that happens, since there's no way to tell which is wrong).
+Every rejection is recorded on fund['_sanity_flags'] for transparency,
+matching this repo's "reasons" pattern. Wired into
+_scan_kenya_market()'s per-stock loop in fetch_all_fundamentals(), so
+every fundamentals fetch is checked before scoring ever sees it; a
+summary is logged when any stock trips a flag. Verified clean (0
+flagged) across all 57 real NSE stocks' live fundamentals.
+
+Calendar cross-check: dividends already have this (dividend_calendar.py,
+verified/corrected/unverified pattern, unchanged here). Earnings do not
+-- checked earnings_calendar.py and found it isn't an independent
+source at all, only an .ics exporter of TradingView's own
+earnings_next_date field, so there's nothing independent to cross-check
+EPS/earnings against yet (matches the spec's own "where feasible"
+hedge). Would need a real second earnings-date source to close that
+half properly -- not attempted here, out of scope for a "basic
+bounds/sanity check" fix.
+
+9 new tests (plausible data untouched, each rejection case individually,
+sign-mismatch and its agreeing-signs counterpart, zero values not
+false-triggering the sign check, missing fields skipped gracefully).
 
 
 7. NO OUTLIER / BAD-TICK DETECTION ON OHLCV DATA
