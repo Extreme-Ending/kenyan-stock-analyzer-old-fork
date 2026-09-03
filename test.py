@@ -3,15 +3,17 @@
 Test suite for the Kenyan Stock Analyzer.
 
 Tests data acquisition, analysis engine, report generation,
-sector analysis, email notifier, and config loading.
+sector analysis, email/Telegram notifiers, and config loading.
 """
 
 import sys
 import os
 import unittest
 import tempfile
+from unittest.mock import patch, Mock
 import pandas as pd
 import numpy as np
+import requests
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src'))
 
@@ -269,6 +271,117 @@ class TestEmailNotifier(unittest.TestCase):
         self.assertIn('NSE Daily Market Report', body)
 
 
+class TestTelegramNotifier(unittest.TestCase):
+    """Test Telegram notification module. Never hits the real Bot API."""
+
+    def _sample_summary_inputs(self):
+        engine = AnalysisEngine()
+        data_dict = {
+            'SCOM': make_sample_data(60, seed=1),
+            'EQTY': make_sample_data(60, seed=2),
+        }
+        results = engine.analyze_multiple_stocks(data_dict)
+        breadth = engine.calculate_market_breadth(results)
+
+        from sector_analysis import SectorAnalyzer
+        sectors = SectorAnalyzer().analyze_sectors(data_dict, results)
+        return results, sectors, breadth
+
+    def test_summary_text_generation(self):
+        from telegram_notifier import TelegramNotifier
+        config = Config()
+        notifier = TelegramNotifier(config)
+
+        results, sectors, breadth = self._sample_summary_inputs()
+        text = notifier.generate_summary_text(results, sectors, breadth, checkpoint='close')
+        self.assertIsInstance(text, str)
+        self.assertIn('SCOM', text)
+        self.assertIn('EQTY', text)
+        self.assertIn('Market Close', text)
+
+    def test_summary_text_includes_alerts(self):
+        from telegram_notifier import TelegramNotifier
+        config = Config()
+        notifier = TelegramNotifier(config)
+
+        results, sectors, breadth = self._sample_summary_inputs()
+        alerts = {'SCOM': ['🟢 Oversold (RSI 25)'], 'EQTY': []}
+        text = notifier.generate_summary_text(results, checkpoint='mid', alerts=alerts)
+        self.assertIn('Alerts', text)
+        self.assertIn('Oversold (RSI 25)', text)
+
+    def test_send_message_success(self):
+        from telegram_notifier import TelegramNotifier
+        config = Config()
+        config.telegram_bot_token = 'test-token'
+        config.telegram_chat_ids = ['12345']
+        notifier = TelegramNotifier(config)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {'ok': True}
+
+        with patch('telegram_notifier.requests.post', return_value=mock_response) as mock_post:
+            result = notifier.send_message('Test message')
+
+        self.assertTrue(result)
+        mock_post.assert_called_once()
+
+    def test_send_message_api_error(self):
+        """Failure mode: Telegram returns a non-ok response -- must degrade to False."""
+        from telegram_notifier import TelegramNotifier
+        config = Config()
+        config.telegram_bot_token = 'test-token'
+        config.telegram_chat_ids = ['12345']
+        notifier = TelegramNotifier(config)
+
+        mock_response = Mock()
+        mock_response.status_code = 400
+        mock_response.json.return_value = {'ok': False, 'description': 'bad chat id'}
+        mock_response.text = '{"ok": false, "description": "bad chat id"}'
+
+        with patch('telegram_notifier.requests.post', return_value=mock_response):
+            result = notifier.send_message('Test message')
+
+        self.assertFalse(result)
+
+    def test_send_message_network_failure(self):
+        """Failure mode: a network error must degrade to False, not raise."""
+        from telegram_notifier import TelegramNotifier
+        config = Config()
+        config.telegram_bot_token = 'test-token'
+        config.telegram_chat_ids = ['12345']
+        notifier = TelegramNotifier(config)
+
+        with patch('telegram_notifier.requests.post',
+                   side_effect=requests.exceptions.ConnectionError('boom')):
+            result = notifier.send_message('Test message')
+
+        self.assertFalse(result)
+
+    def test_send_message_not_configured(self):
+        """Failure mode: missing bot token/chat ID must fail safe, not raise."""
+        from telegram_notifier import TelegramNotifier
+        config = Config()
+        config.telegram_bot_token = ''
+        config.telegram_chat_ids = []
+        notifier = TelegramNotifier(config)
+
+        result = notifier.send_message('Test message')
+        self.assertFalse(result)
+
+    def test_send_document_not_configured(self):
+        """Failure mode: send_document must also fail safe when unconfigured."""
+        from telegram_notifier import TelegramNotifier
+        config = Config()
+        config.telegram_bot_token = ''
+        config.telegram_chat_ids = []
+        notifier = TelegramNotifier(config)
+
+        result = notifier.send_document('/nonexistent/path.pdf')
+        self.assertFalse(result)
+
+
 def run_tests():
     """Run all tests and print results."""
     print("=" * 60)
@@ -285,6 +398,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestSectorAnalysis))
     suite.addTests(loader.loadTestsFromTestCase(TestReportGenerator))
     suite.addTests(loader.loadTestsFromTestCase(TestEmailNotifier))
+    suite.addTests(loader.loadTestsFromTestCase(TestTelegramNotifier))
 
     # Run
     runner = unittest.TextTestRunner(verbosity=2)

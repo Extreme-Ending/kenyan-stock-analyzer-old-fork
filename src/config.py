@@ -100,6 +100,17 @@ class Config:
         self.smtp_host = os.getenv('SMTP_HOST', 'smtp.gmail.com')
         self.smtp_port = int(os.getenv('SMTP_PORT', '587'))
 
+        # ---- Telegram ----
+        self.enable_telegram_notifications = (
+            os.getenv('ENABLE_TELEGRAM_NOTIFICATIONS', 'false').lower() == 'true'
+        )
+        self.telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN', '')
+        self.telegram_chat_ids = [
+            c.strip() for c in
+            os.getenv('TELEGRAM_CHAT_ID', '').split(',')
+            if c.strip()
+        ]
+
         # ---- Stock symbols ----
         self.stock_symbols = self._load_symbols()
 

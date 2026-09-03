@@ -1,0 +1,307 @@
+KENYAN STOCK ANALYZER — FEATURE ROADMAP
+================================================================
+Broader feature roadmap beyond data-analysis/accuracy work.
+See IMPROVEMENTS.txt for data-quality items (scoring accuracy,
+backtesting, price/fundamentals validation, horizon labels).
+See CLAUDE.md for engineering standards these should follow.
+
+Each item: current state -> problem/opportunity -> proposed approach.
+
+
+================================================================
+0. TARGET DEPLOYMENT ARCHITECTURE (constraint for everything below)
+================================================================
+
+Decided direction: S3 (static hosting for the dashboard) + Lambda
+(compute) + SNS (email/notification fan-out). Every section below
+should be read with this shape in mind, not a generic
+"some server somewhere" assumption. Terraform for this is still
+parked (per earlier conversation) but the target shape now informs
+how we build toward it.
+
+0a. S3 — dashboard hosting
+--------------------------------------------------------------
+Confirmed in code: report_generator.py embeds every chart as a
+base64 PNG directly inside the HTML (`data:image/png;base64,...`,
+see _fig_to_base64 and the chart-embedding call sites). Every
+generated report is a single self-contained HTML file — no
+separate image assets to keep in sync. That means hosting on S3
+is just `aws s3 sync reports/ s3://<bucket>/` (or a Terraform
+`aws_s3_object`/`aws_s3_bucket` resource driven the same way) —
+no CDN-asset-pipeline complexity needed. Static website hosting
+or S3 + CloudFront both work; CloudFront adds HTTPS + caching if
+we want a nicer URL than the raw S3 website endpoint.
+Excel export (.xlsx) can sync alongside if we want it downloadable
+from the same bucket; the earnings.ics file too.
+
+0b. Lambda — compute constraints to design around
+--------------------------------------------------------------
+Two real constraints, both worth checking before committing code
+to run there:
+  - PACKAGE SIZE: requirements.txt pulls in matplotlib, scipy,
+    pandas, numpy, seaborn, weasyprint — heavy. Zip-based Lambda
+    has a 250MB unzipped limit; this stack is likely to blow past
+    that. Use a container-image Lambda (up to 10GB, and the venv
+    we already built here is a good starting point for the image)
+    rather than fighting zip/layer size limits.
+  - EXECUTION TIME: Lambda's hard cap is 15 minutes. Our local
+    full run (--detailed --export-excel, 55 stocks, individual
+    reports + Excel) took ~7.5 minutes end-to-end (16:31:41 to
+    16:39:14 in our test run). That fits, but with less margin
+    than we'd like, especially with S3-network variance from
+    inside Lambda instead of local disk. The LEAN path
+    (send_summary.py — watchlist + summary only, no per-stock
+    HTML) is much faster and safely fits.
+  Recommendation: run send_summary.py's lean pipeline on Lambda
+  first (matches section 1's push-notification use case exactly).
+  For the full detailed dashboard regen, benchmark actual Lambda
+  runtime before assuming it fits — if it's tight, ECS
+  Fargate (no 15-minute ceiling) is the fallback for that specific
+  job while Lambda still handles the fast daily-summary path.
+
+0c. SNS — notifications
+--------------------------------------------------------------
+SNS is a good fit as a FAN-OUT HUB, not a drop-in replacement for
+today's SMTP-based email_notifier.py:
+  - SNS email delivery is plain text (or JSON), not MIME with a
+    PDF attachment — it can't do what email_notifier.py currently
+    does (send the actual PDF as an attachment).
+  - Best fit: Lambda uploads the PDF summary to S3 (0a), then
+    publishes ONE SNS message (short text: headline alerts +
+    a link to the S3-hosted PDF); SNS fans that single publish out
+    to every subscriber — an email subscription, optionally an SMS
+    subscription, and an HTTPS subscription endpoint that forwards
+    into the Telegram/WhatsApp adapters from section 1a. This
+    reuses the "one payload, many channel adapters" design already
+    planned in 1a — SNS becomes the fan-out mechanism instead of
+    each channel being called directly from send_summary.py.
+  - Keep SMTP as a fallback/direct option only if we specifically
+    want the PDF as a real email attachment rather than a link —
+    otherwise SNS is simpler and matches the S3+Lambda shape.
+
+
+================================================================
+1. NOTIFICATIONS — Telegram + WhatsApp
+================================================================
+
+Current: one channel — email, via src/email_notifier.py, triggered
+by .github/workflows/daily-summary.yml (send_summary.py) on a
+GitHub Actions schedule.
+
+Goal: add Telegram and WhatsApp as additional (not replacement)
+channels for the same daily summary, and design it so more
+channels can be added later without rewriting the send path.
+
+1a. Shared design — build once, reuse for every channel
+--------------------------------------------------------------
+Extract a generic notifier interface (mirrors email_notifier.py's
+shape): send_summary.py already builds ONE summary payload
+(market pulse, watchlist, gainers/losers, alerts, upcoming
+ex-dividends) before handing it to the emailer. Each channel
+(email/Telegram/WhatsApp/future) should be a thin adapter that
+takes that same payload and formats+sends it its own way —
+never duplicate the "what to say" logic per channel.
+
+1b. Telegram (do this first — cheapest to stand up)
+--------------------------------------------------------------
+- Free, official Bot API, no business verification needed.
+- Setup: create a bot via @BotFather, get a bot token, get the
+  target chat_id(s) (personal chat or a channel/group).
+- Two shapes, pick one to start:
+  (i)  PUSH ONLY (recommended first step) — reuse the existing
+       scheduled GitHub Actions workflow; after building the
+       summary, POST it to the Telegram Bot API
+       (sendMessage / sendDocument for the PDF) using `requests`
+       — no persistent process needed, fits the current
+       "throwaway GitHub Actions runner" architecture exactly.
+  (ii) INTERACTIVE BOT (/price SCOM, /watchlist, on-demand) —
+       a webhook shape now fits the decided architecture (0):
+       API Gateway + Lambda receiving Telegram's webhook, reading
+       the latest scores from S3 (or the read API in section 7)
+       instead of re-running the whole pipeline. Long-polling does
+       NOT fit Lambda (no long-running process) — webhook is the
+       right shape here, not polling. Still sequence this after
+       1b-i (push) is working and after section 7's read API
+       exists, since the bot needs fast on-demand data, not a
+       full pipeline re-run per query.
+- Secrets: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID as GitHub Actions
+  secrets, same pattern as EMAIL_USER/EMAIL_PASSWORD.
+
+STATUS (2026-09-03): 1b-i's local half is done and tested.
+src/telegram_notifier.py (TelegramNotifier: send_message,
+send_document, generate_summary_text) is wired into
+send_summary.py via a new --checkpoint {open,mid,close} flag:
+  - open  -> email (unchanged default, full summary + PDF + .ics)
+  - mid   -> Telegram, short intraday pulse (text only)
+  - close -> Telegram, fuller EOD text + PDF via sendDocument
+TELEGRAM_CHAT_ID supports multiple comma-separated chat IDs
+(config.telegram_chat_ids); a failed send to one chat doesn't
+block delivery to the others. Covered by test.py's
+TestTelegramNotifier (mocked HTTP, no live network). Verified
+locally end-to-end against real NSE data (2026-09-03).
+Not yet done: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID GitHub Actions
+secrets, the three-cron daily-summary.yml schedule (open/mid/close
+instead of the current single evening run), and 1b-ii (interactive
+bot / webhook — still correctly sequenced after this and after
+section 7's read API).
+
+1c. WhatsApp (real constraints — decide before building)
+--------------------------------------------------------------
+Unlike Telegram, WhatsApp has no free/instant personal-bot route.
+Two real options, both need a decision up front:
+  (i)  Meta WhatsApp Cloud API (official, free tier exists) —
+       requires a Meta Business account, phone number
+       verification, and app review for anything beyond a small
+       set of pre-approved template messages to first-time
+       recipients. Setup friction is real but it's free at low
+       volume and is the "proper" long-term route.
+  (ii) Twilio WhatsApp API (third-party) — faster to set up
+       (sandbox available immediately for testing), but paid
+       per-message beyond the sandbox, and production requires
+       WhatsApp Business approval through Twilio too.
+  Recommendation: prototype with Twilio's sandbox (fast, no
+  business verification needed for testing), decide on Cloud API
+  vs Twilio for production once the notification is proven useful.
+- Push-only fits the same GitHub Actions job as Telegram — send
+  the summary as a WhatsApp template message after building it.
+- Secrets: WHATSAPP_* tokens/IDs as GitHub Actions secrets.
+
+1d. Per-user delivery preferences
+--------------------------------------------------------------
+Today .env has ONE shared watchlist and ONE recipient list.
+Once there's more than one channel, worth deciding: does everyone
+get every channel, or can a user pick (e.g. Telegram only)? Keep
+this simple (a config list of {channel, destination}) rather than
+building real user accounts unless there's demand for that.
+
+
+================================================================
+2. RELIABILITY / OPERATIONS
+================================================================
+
+- Retry/backoff + circuit-breaking tuned per data source. Some
+  sources (CBK, T-bills, bonds pages) came back "unavailable" in
+  our test run — worth checking whether those scrapers are
+  actually broken (site changed) vs. just flaky, since a broken
+  scraper and a flaky one need different fixes.
+- CI: run test.py on every push/PR via GitHub Actions, separate
+  from the existing daily-summary.yml scheduled job.
+- Dockerize the pipeline — run.sh is macOS-only today (Homebrew
+  paths, `open`, a hardcoded python3.14 path); a Dockerfile
+  removes "works on my machine" issues and is also a prerequisite
+  for a clean ECS/Fargate deployment if we go that route later.
+- Move data/history/daily_snapshots.csv to SQLite (or Postgres if
+  we're already provisioning a database for something else) —
+  CSV read-modify-write gets slower and is fragile under
+  concurrent/scheduled runs as history grows.
+
+
+================================================================
+3. DASHBOARD / UX
+================================================================
+
+- Filter the all-stocks table by sector/signal (sortable columns
+  already shipped in a recent PR — filtering is the natural next
+  step).
+- Side-by-side comparison view (pick 2-3 stocks).
+- Historical price charts with a user's own trade entries
+  overlaid — depends on portfolio tracking existing first (not
+  yet built; would need its own data model + UI).
+
+
+================================================================
+4. TESTING
+================================================================
+
+- Expand test.py coverage: scoring.py, price_validation.py, and
+  the dividend/earnings calendar modules aren't covered today
+  (see CLAUDE.md's Testing section for the pattern to follow —
+  synthetic data, no live network calls, failure-mode tests too).
+- Once notifications (section 1) ship, they need tests too: mock
+  the Telegram/WhatsApp HTTP calls, verify the payload sent
+  matches what the summary builder produced — never hit the real
+  APIs from tests.
+
+
+================================================================
+5. OBSERVABILITY / DATA-SOURCE HEALTH  (new — not previously listed)
+================================================================
+
+Current: when a scrape source fails, it logs a WARNING and the
+pipeline degrades gracefully (per CLAUDE.md's fail-safe rule) —
+but nobody is watching those warnings. In our test run, CBK,
+T-bills, and bonds pages were all "unavailable" and that's easy
+to miss for weeks since the dashboard still renders fine without
+them.
+
+Proposed: persist a per-run health record (which sources
+succeeded/failed, alongside history_tracker.py's existing daily
+snapshot) and alert through the new notification channels (once
+section 1 exists) when a source has been down for N consecutive
+runs. Turns a silent degrade into a visible, actionable signal.
+
+
+================================================================
+6. SECURITY & SCRAPING RESILIENCE  (new — not previously listed)
+================================================================
+
+- Dependency vulnerability scanning — enable GitHub Dependabot
+  alerts (free for public repos) or add `pip-audit` to CI.
+- The tool scrapes several third-party sites (TradingView,
+  afx.kwayisi.org, mystocks.co.ke, NSE PDF, oil/FX/news sources).
+  Worth documenting scraping etiquette explicitly (honest
+  User-Agent, reasonable request spacing, respecting robots.txt
+  where present) — getting IP-banned or ToS-flagged on any of
+  these would break real functionality, not just a nice-to-have.
+- Secrets hygiene is already decent (.env gitignored, GitHub
+  Actions secrets used correctly) — CLAUDE.md formalizes this
+  going forward, nothing new to build here.
+
+
+================================================================
+7. LIGHTWEIGHT READ API  (new — not previously listed, optional)
+================================================================
+
+Current: output is only static HTML/PDF/Excel files generated
+per run; nothing can query "what's SCOM's score right now"
+programmatically.
+
+Opportunity: a small read-only API — API Gateway + Lambda (fits
+the decided architecture in section 0 directly, no new hosting
+type needed) reading the latest scores/prices from a small S3
+JSON object that main.py writes alongside the HTML each run
+(cheapest: no database needed, just one more S3 object per run)
+would:
+  - unlock the INTERACTIVE Telegram bot mode (1b-ii) without
+    re-running the whole pipeline per query
+  - make future integrations (mobile view, a simple web app)
+    much easier than parsing generated HTML
+Not urgent — only build this once an interactive bot or another
+consumer actually needs it.
+
+
+PRIORITY SUGGESTION
+================================================================
+1. Telegram push notification (1b-i) — cheapest, reuses existing
+   GitHub Actions job, immediate value, no AWS needed yet.
+2. Observability on data-source health (5) — cheap, prevents
+   silent breakage of things we already built.
+3. CI running test.py on push/PR (2) — protects everything else
+   we build from here on.
+4. Dockerize the pipeline (2) — do this before touching Lambda;
+   a working container is the shared prerequisite for both the
+   container-image Lambda (0b) and any ECS Fargate fallback.
+5. S3 + Lambda + SNS for the daily-summary path (0, replaces the
+   current email-only GitHub Actions job) — build the lean
+   send_summary.py flow on Lambda first (0b), sync its output to
+   S3 (0a), publish through SNS (0c). This is also where the
+   Terraform work plugs in.
+6. WhatsApp push notification (1c) — more setup friction, do once
+   Telegram + SNS's shared-payload design is proven on Lambda.
+7. Dashboard filtering (3) — quick UX win, no new infra.
+8. CSV->SQLite for history (2) — do before scaling run frequency.
+9. Security scanning (6) — cheap, enable and forget (Dependabot).
+10. Expanded test coverage (4) — ongoing, do alongside any touched
+    module per CLAUDE.md's testing rule.
+11. Interactive bot + read API (1b-ii, 7) — only once the lean
+    Lambda path (step 5) is proven; needs S3 JSON + API Gateway.

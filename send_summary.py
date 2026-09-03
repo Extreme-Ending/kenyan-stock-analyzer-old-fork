@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Daily summary emailer.
+Daily summary notifier.
 
 Runs a lean version of the pipeline (data → analysis → fundamentals →
 price validation → scoring), builds a compact one-page PDF summary of key
-metrics, and emails it as an attachment. Intended to run unattended on a
-schedule (e.g. GitHub Actions at 22:00 EAT), independent of any laptop.
+metrics, and delivers it on one of three intraday checkpoints (see
+ROADMAP.txt section 1): --checkpoint open (email, full summary + PDF),
+mid (Telegram, short intraday pulse), or close (Telegram, end-of-day
+summary + PDF). Intended to run unattended on a schedule (e.g. GitHub
+Actions, three times a day), independent of any laptop.
 
 Does NOT generate the full dashboard or per-stock reports — it is a subset.
-Run manually to test:  python send_summary.py
+Run manually to test:  python send_summary.py --checkpoint open
 """
 
 import os
@@ -67,9 +70,37 @@ def market_closed_today():
     return False, None
 
 
+VALID_CHECKPOINTS = ('open', 'mid', 'close')
+
+
+def get_checkpoint() -> str:
+    """
+    Read --checkpoint <open|mid|close> from argv. Defaults to 'open' (email,
+    full summary) so existing callers that don't pass --checkpoint keep
+    today's behavior unchanged.
+
+    Returns:
+        One of VALID_CHECKPOINTS.
+
+    Raises:
+        SystemExit: if --checkpoint is given an unrecognized value.
+    """
+    if '--checkpoint' not in sys.argv:
+        return 'open'
+    i = sys.argv.index('--checkpoint')
+    if i + 1 >= len(sys.argv):
+        sys.exit("--checkpoint requires a value: open, mid, or close")
+    value = sys.argv[i + 1]
+    if value not in VALID_CHECKPOINTS:
+        sys.exit(f"--checkpoint must be one of {VALID_CHECKPOINTS}, got '{value}'")
+    return value
+
+
 def main():
+    checkpoint = get_checkpoint()
+
     logger.info("=" * 60)
-    logger.info(f"NSE DAILY SUMMARY EMAIL — {datetime.now():%Y-%m-%d %H:%M}")
+    logger.info(f"NSE SUMMARY [{checkpoint.upper()}] — {datetime.now():%Y-%m-%d %H:%M}")
     logger.info("=" * 60)
 
     # Skip weekends and Kenyan public holidays (NSE is closed — no new data).
@@ -77,8 +108,8 @@ def main():
     if '--ignore-calendar' not in sys.argv:
         closed, reason = market_closed_today()
         if closed:
-            logger.info(f"NSE is closed today ({reason}) — skipping summary email.")
-            print(f"Skipped: NSE closed today ({reason}). No email sent.")
+            logger.info(f"NSE is closed today ({reason}) — skipping [{checkpoint}] summary.")
+            print(f"Skipped: NSE closed today ({reason}). No notification sent.")
             return
 
     force = '--force-refresh' in sys.argv
@@ -184,11 +215,42 @@ def main():
     elif isinstance(result, str) and result.endswith('.pdf'):
         pdf_path = result
 
-    # ---- Email ----
+    # ---- Deliver on the requested checkpoint ----
+    # open  -> email (full summary + PDF + .ics)
+    # mid   -> Telegram (short intraday pulse, text only)
+    # close -> Telegram (end-of-day summary + PDF)
+    if checkpoint == 'open':
+        ok = send_open_email(config, analysis_results, sector_data, breadth, pdf_path, ics_path, result)
+    else:
+        ok = send_telegram_update(config, checkpoint, analysis_results, sector_data, breadth, alerts, pdf_path, result)
+
+    if not ok:
+        sys.exit(1)
+
+
+def send_open_email(config, analysis_results, sector_data, breadth, pdf_path, ics_path, built_result):
+    """
+    Send the market-open summary by email (full body + PDF + .ics attachments).
+
+    Args:
+        config: Config object.
+        analysis_results: dict from AnalysisEngine.analyze_multiple_stocks.
+        sector_data: dict from SectorAnalyzer.analyze_sectors.
+        breadth: dict from AnalysisEngine.calculate_market_breadth.
+        pdf_path: Path to the generated summary PDF, or None.
+        ics_path: Path to the generated earnings .ics, or None.
+        built_result: Whatever report_gen.generate_summary returned, used
+            only for the "built but not sent" log/print message.
+
+    Returns:
+        bool: True on success, or if email is intentionally disabled
+        (config.enable_email_notifications is false — that's a valid
+        "built but not sent" outcome, not a failure).
+    """
     if not config.enable_email_notifications:
         logger.warning("ENABLE_EMAIL_NOTIFICATIONS is false — summary built but not emailed.")
-        print(f"Summary built: {result}")
-        return
+        print(f"Summary built: {built_result}")
+        return True
 
     from email_notifier import EmailNotifier
     notifier = EmailNotifier(config)
@@ -196,14 +258,64 @@ def main():
     attachments = [pdf_path] if pdf_path else []
     if ics_path and os.path.exists(ics_path):
         attachments.append(ics_path)
-    subject = f"NSE Daily Summary — {datetime.now():%Y-%m-%d}"
+    subject = f"NSE Market Open Summary — {datetime.now():%Y-%m-%d}"
     ok = notifier.send_report(subject, body, attachments=attachments)
     if ok:
         logger.info(f"Summary emailed (attachment: {pdf_path})")
         print("Summary emailed successfully.")
     else:
         logger.error("Failed to email summary")
-        sys.exit(1)
+    return ok
+
+
+def send_telegram_update(config, checkpoint, analysis_results, sector_data, breadth, alerts, pdf_path, built_result):
+    """
+    Send a mid-day or close-of-market update via Telegram.
+
+    'mid' sends a short text-only intraday pulse; 'close' sends the
+    end-of-day summary text plus the PDF as a document attachment.
+
+    Args:
+        config: Config object.
+        checkpoint: 'mid' or 'close'.
+        analysis_results: dict from AnalysisEngine.analyze_multiple_stocks.
+        sector_data: dict from SectorAnalyzer.analyze_sectors.
+        breadth: dict from AnalysisEngine.calculate_market_breadth.
+        alerts: dict of symbol -> list of alert strings.
+        pdf_path: Path to the generated summary PDF, or None.
+        built_result: Whatever report_gen.generate_summary returned, used
+            only for the "built but not sent" log/print message.
+
+    Returns:
+        bool: True on success, or if Telegram is intentionally disabled
+        (config.enable_telegram_notifications is false).
+    """
+    if not config.enable_telegram_notifications:
+        logger.warning("ENABLE_TELEGRAM_NOTIFICATIONS is false — summary built but not sent.")
+        print(f"Summary built: {built_result}")
+        return True
+
+    from telegram_notifier import TelegramNotifier
+    notifier = TelegramNotifier(config)
+
+    # 'mid' -> text-only intraday pulse (no breadth/sectors, keeps it short).
+    # 'close' -> full text summary plus the PDF as a document attachment.
+    if checkpoint == 'mid':
+        text = notifier.generate_summary_text(analysis_results, checkpoint=checkpoint, alerts=alerts)
+        ok = notifier.send_message(text)
+    else:  # close
+        text = notifier.generate_summary_text(analysis_results, sector_data=sector_data,
+                                              breadth=breadth, checkpoint=checkpoint, alerts=alerts)
+        ok = notifier.send_message(text)
+        if pdf_path and os.path.exists(pdf_path):
+            ok = notifier.send_document(pdf_path, caption="NSE Daily Summary PDF") and ok
+
+    if ok:
+        logger.info(f"Telegram [{checkpoint}] update sent")
+        print(f"Telegram [{checkpoint}] update sent successfully.")
+    else:
+        logger.error(f"Failed to send Telegram [{checkpoint}] update")
+    return ok
 
 
 if __name__ == "__main__":

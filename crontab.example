@@ -15,6 +15,16 @@
 # ---- Option 3: Quick daily run (just dashboard, no individual reports) ----
 # 0 12 * * 1-5 cd /path/to/kenyan_stock_analyzer && ./venv/bin/python main.py --report-type html --export-excel >> logs/cron.log 2>&1
 
+# ---- Option 4: Notification checkpoints (email at open, Telegram at mid/close) ----
+# open  = 09:15 EAT = 06:15 UTC  -> email, full summary + PDF + .ics
+# mid   = 12:00 EAT = 09:00 UTC  -> Telegram, short intraday pulse
+# close = 15:20 EAT = 12:20 UTC  -> Telegram, EOD summary + PDF
+# 15 6  * * 1-5 cd /path/to/kenyan_stock_analyzer && ./send_notification.sh open  --ignore-calendar >> logs/cron.log 2>&1
+# 0  9  * * 1-5 cd /path/to/kenyan_stock_analyzer && ./send_notification.sh mid   --ignore-calendar >> logs/cron.log 2>&1
+# 20 12 * * 1-5 cd /path/to/kenyan_stock_analyzer && ./send_notification.sh close --ignore-calendar >> logs/cron.log 2>&1
+# (drop --ignore-calendar once you trust the weekend/holiday check — see
+# send_summary.py's market_closed_today())
+
 # ---- Notes ----
 # - EAT is UTC+3, so 15:00 EAT = 12:00 UTC
 # - Kenya does not observe daylight saving time

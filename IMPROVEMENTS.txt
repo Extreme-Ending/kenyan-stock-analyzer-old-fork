@@ -1,0 +1,173 @@
+KENYAN STOCK ANALYZER — DATA ANALYSIS & ACCURACY IMPROVEMENTS
+================================================================
+Tracking file for planned work to make the tool as accurate as possible.
+Scope: data analysis & data quality only (deployment/CI/infra tracked separately).
+Each item: current state -> problem -> proposed fix.
+
+
+1. SCORING DOESN'T USE SECTOR-RELATIVE VALUATION (highest priority)
+--------------------------------------------------------------
+Where: src/scoring.py (_score_value), src/market_context.py (valuation_vs_sector)
+
+Current: market_context.py already computes per-sector median P/E, P/B,
+dividend yield, and ROE, and exposes valuation_vs_sector() to compare a
+stock against its sector peers. This is shown on the fundamentals page.
+
+Problem: scoring.py's _score_value() ignores it and scores every stock on
+the same fixed absolute curve (e.g. "P/E 8 -> 100, P/E 33 -> 0"). A bank
+(naturally low P/E) and a manufacturer (naturally higher P/E) are scored
+on an identical scale, which is not a fair comparison.
+
+Fix: pass sector_medians into score_stock() and score P/E, P/B, dividend
+yield, and ROE relative to the stock's own sector median instead of (or
+blended with) the fixed absolute breakpoints.
+
+
+2. NO BACKTESTING / ACCURACY FEEDBACK LOOP
+--------------------------------------------------------------
+Where: src/history_tracker.py, data/history/daily_snapshots.csv
+
+Current: every run appends price, signal, and score per stock to a CSV.
+Nothing ever reads it back.
+
+Problem: the tool has zero evidence that its own "bullish"/"strong buy"
+calls actually perform. No way to know if the scoring model works.
+
+Fix: build a backtest module that joins daily_snapshots.csv against
+itself N trading days forward (e.g. 5/20/60 days) and reports: hit rate
+per signal type, average forward return per score bucket (0-20, 20-40,
+... 80-100), and per-factor (value/quality/momentum/dividend/liquidity)
+correlation with forward returns. Surface a summary on the dashboard
+("Track record" page) once enough history has accumulated.
+
+
+3. SCORING WEIGHTS AND COEFFICIENTS ARE HAND-PICKED, NOT CALIBRATED
+--------------------------------------------------------------
+Where: src/scoring.py (DEFAULT_WEIGHTS, all _score_* linear coefficients)
+
+Current: weights (value 0.25, quality 0.25, momentum 0.20, dividend 0.15,
+liquidity 0.15) and every sub-score curve are guessed constants.
+
+Problem: no statistical basis for these numbers.
+
+Fix: depends on #2 (backtesting). Once forward-return data exists per
+factor, refit weights/coefficients against actual NSE performance instead
+of intuition. Re-run periodically (e.g. quarterly) as more history accrues.
+
+
+4. MOMENTUM SUB-SCORE MAY DOUBLE-COUNT THE TECHNICAL SIGNAL
+--------------------------------------------------------------
+Where: src/scoring.py (_score_momentum), src/analysis_engine.py
+
+Current: _score_momentum() blends the `overall` bullish/bearish/neutral
+signal AND RSI into the momentum score, but `overall` is itself already
+derived partly from RSI/MACD in analysis_engine.py.
+
+Problem: correlated inputs risk inflating momentum score's effective
+weight beyond what DEFAULT_WEIGHTS intends.
+
+Fix: audit analysis_engine.py's `overall` signal derivation; either
+decorrelate the inputs (e.g. drop raw RSI from momentum score since it's
+already baked into `overall`) or explicitly account for the correlation
+when calibrating weights (#3).
+
+
+5. PRICE VALIDATION IS SINGLE-SOURCE WITH A STATIC DISAGREEMENT THRESHOLD
+--------------------------------------------------------------
+Where: src/price_validation.py
+
+Current: only one independent reference (afx.kwayisi.org). Fixed 1%
+disagreement threshold for every stock.
+
+Problem: if afx.kwayisi.org is unreachable, validation silently degrades
+to "unverified" for the entire run — no fallback reference. A flat 1%
+threshold produces more false "mismatch" flags on thinly-traded/illiquid
+stocks (naturally wider spreads) than on liquid ones.
+
+Fix: add a second independent reference source as fallback (e.g. NSE's
+own daily PDF price list, already used elsewhere in data_acquisition.py
+as a fallback — reuse it here). Scale disagree_threshold_pct by a
+liquidity proxy (e.g. value_traded or average daily volume) instead of
+using one flat threshold for all 57 stocks.
+
+
+6. FUNDAMENTALS HAVE NO CROSS-CHECK AT ALL
+--------------------------------------------------------------
+Where: src/fundamental_analysis.py
+
+Current: prices are validated against a second source (price_validation.py);
+fundamentals (EPS, revenue, margins, ROE, etc.) come from TradingView's
+scanner alone with no independent check.
+
+Problem: one bad/stale TradingView field flows straight into the score
+with no sanity check.
+
+Fix: add basic bounds/sanity checks (e.g. reject negative revenue,
+implausible ROE, EPS growth that contradicts reported net income
+direction). Where feasible, cross-check against the NSE dividend/earnings
+calendars already scraped in src/dividend_calendar.py and
+src/earnings_calendar.py, following the same verified/corrected/
+uncross-checked pattern already used for dividends.
+
+
+7. NO OUTLIER / BAD-TICK DETECTION ON OHLCV DATA
+--------------------------------------------------------------
+Where: src/data_acquisition.py, src/analysis_engine.py
+
+Current: no visible filtering of anomalous bars before computing RSI,
+MACD, Bollinger Bands, ATR, etc.
+
+Problem: a single bad print (stale duplicate, decimal error, erroneous
+spike) can distort indicators for the rest of the lookback window.
+
+Fix: add a lightweight sanity filter on incoming OHLCV bars (e.g. flag/
+drop bars where high < low, close outside [low, high], or a single-day
+move beyond N standard deviations of recent volatility with no matching
+volume spike) before feeding the data into AnalysisEngine.
+
+
+8. NO SHORT-TERM VS LONG-TERM HORIZON CLASSIFICATION
+--------------------------------------------------------------
+Where: src/scoring.py, src/report_generator.py, templates/
+
+Current: a stock gets one "Buy/Sell/Hold"-style signal and one overall
+score, with no indication of the time horizon that signal applies to.
+
+Problem: a technically-driven "bullish" call (RSI bounce, MACD cross) is
+actionable over days-to-weeks; a fundamentally-driven "cheap + high
+quality + high dividend" call is actionable over months-to-years. Showing
+both as the same undifferentiated "Buy" is misleading — a user acting on
+a momentum-only signal as if it were a long-term thesis (or vice versa)
+can make a bad decision.
+
+Fix: derive a horizon classification per stock from which sub-scores are
+actually driving the call:
+  - SHORT-TERM (days-weeks): momentum/technical sub-score dominates
+    (fresh MACD cross, RSI oversold bounce, near support/resistance).
+    Suggested holding period tied to the signal type, e.g. "1-4 weeks"
+    for a MACD cross, "days" for an RSI oversold bounce.
+  - LONG-TERM (months-years): value/quality/dividend sub-scores dominate
+    and agree (cheap vs sector + strong ROE/margins + sustainable yield).
+    Suggested holding period e.g. "6-12+ months", tied to typical
+    earnings-cycle/dividend-cycle timeframes.
+  - MIXED/UNCLEAR: sub-scores conflict (e.g. cheap fundamentally but
+    bearish technically) — surface this explicitly rather than forcing
+    a single label.
+Implementation: add a `horizon` field to score_stock()'s output (label +
+suggested time period string + which sub-scores drove the classification,
+for transparency — consistent with the "reasons" transparency pattern
+already used elsewhere in scoring.py). Display it next to the existing
+score/signal on the dashboard and individual stock reports.
+
+
+PRIORITY ORDER (suggested)
+--------------------------------------------------------------
+1. Item 1 (sector-relative scoring) — quick win, data already exists.
+2. Item 8 (short/long-term horizon) — high user value, builds on existing
+   sub-scores, no new data source needed.
+3. Item 2 (backtesting) — foundational for calibrating everything else.
+4. Item 5 (price validation fallback source + liquidity-scaled threshold).
+5. Item 7 (OHLCV outlier detection) — data integrity foundation.
+6. Item 6 (fundamentals cross-check).
+7. Item 4 (momentum double-counting audit).
+8. Item 3 (weight recalibration) — depends on item 2's backtest data.
