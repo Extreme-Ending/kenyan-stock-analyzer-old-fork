@@ -55,6 +55,37 @@ per signal type, average forward return per score bucket (0-20, 20-40,
 correlation with forward returns. Surface a summary on the dashboard
 ("Track record" page) once enough history has accumulated.
 
+STATUS (2026-09-03): Done. New src/backtest.py: run_backtest() joins
+HistoryTracker.load_history() against itself per symbol N recorded runs
+forward (not calendar days -- a symbol only has a row for a day the
+pipeline ran) via groupby('symbol')['price'].shift(-horizon), for
+horizons (5, 20, 60). Reports hit_rate_by_signal (bullish=positive
+return, bearish=negative, neutral=within +/-2%), avg_return_by_score_
+bucket (five 0-100 buckets), and factor_correlation (Pearson r per
+sub-score vs forward return, skipped below 3 paired points). A horizon
+without enough recorded days reports 'insufficient_history' explicitly
+rather than a misleading stat from 1-2 points -- fail-safe per CLAUDE.md,
+and the real, current, expected state today (this repo has 1 day of
+history recorded so far; all three horizons correctly report that).
+Required extending history_tracker.py's schema to also record the 5
+sub-scores (score_value/quality/momentum/dividend/liquidity), not just
+the overall blend -- old rows without those columns are handled
+automatically (NaN, skipped) since a column-missing history DataFrame is
+also exactly the "not upgraded yet" fail-safe case, tested directly.
+New "🎯 Track Record" dashboard page (report_generator.py's
+_build_track_record_body/_track_record_horizon_section) wired into
+main.py after history recording, color-coded (green/amber/red) hit
+rates, bucket returns, and correlations, reusing the existing fgood/
+fmid/fbad verdict classes. 14 new tests (forward-return math verified
+against a hand-computed expected value, perfect-directional-data hit
+rates, score-bucket split, positive correlation on a constructed
+score-proportional dataset, missing-column graceful skip, empty/None/
+too-few-days fail-safe paths, history_tracker round-trip). Verified
+against a real run (correctly shows "insufficient_history" for all
+three horizons at 1 day recorded) and against synthetic 'ok'-status
+data rendered through the real _build_track_record_body to confirm the
+populated tables display correctly (screenshotted, not just unit-tested).
+
 
 3. SCORING WEIGHTS AND COEFFICIENTS ARE HAND-PICKED, NOT CALIBRATED
 --------------------------------------------------------------

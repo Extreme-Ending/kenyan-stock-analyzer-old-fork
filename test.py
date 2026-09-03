@@ -380,6 +380,167 @@ class TestScoring(unittest.TestCase):
         self.assertIn(result['horizon']['label'], ('SHORT-TERM', 'LONG-TERM', 'MIXED', 'UNCLEAR'))
 
 
+class TestHistoryTracker(unittest.TestCase):
+    """Test the daily-snapshot history CSV, including sub-score columns
+    (IMPROVEMENTS.txt item 2 depends on these being recorded)."""
+
+    def test_record_and_load_round_trip(self):
+        from history_tracker import HistoryTracker
+        with tempfile.TemporaryDirectory() as tmp:
+            ht = HistoryTracker(data_dir=tmp)
+            analysis_results = {'SCOM': {'latest': {'close': 35.0, 'rsi': 55.0},
+                                         'signals': {'overall': 'bullish'},
+                                         'daily_change_pct': 1.2}}
+            scores = {'SCOM': {'overall': 68, 'value': 55, 'quality': 70,
+                              'momentum': 75, 'dividend': 60, 'liquidity': 80}}
+            n = ht.record_snapshot(analysis_results, {'SCOM': {'tech_rating': 0.18}}, scores)
+            self.assertEqual(n, 1)
+
+            history = ht.load_history()
+            row = history[history['symbol'] == 'SCOM'].iloc[0]
+            self.assertEqual(row['score'], 68)
+            self.assertEqual(row['score_value'], 55)
+            self.assertEqual(row['score_quality'], 70)
+            self.assertEqual(row['score_momentum'], 75)
+            self.assertEqual(row['score_dividend'], 60)
+            self.assertEqual(row['score_liquidity'], 80)
+
+    def test_same_day_rerun_replaces_not_duplicates(self):
+        from history_tracker import HistoryTracker
+        with tempfile.TemporaryDirectory() as tmp:
+            ht = HistoryTracker(data_dir=tmp)
+            results = {'SCOM': {'latest': {'close': 35.0}, 'signals': {}, 'daily_change_pct': 0}}
+            ht.record_snapshot(results, date='2026-01-01')
+            ht.record_snapshot(results, date='2026-01-01')
+            self.assertEqual(ht.days_recorded(), 1)
+            self.assertEqual(len(ht.load_history()), 1)
+
+
+class TestBacktest(unittest.TestCase):
+    """Test the accuracy backtest module (IMPROVEMENTS.txt item 2). Pure
+    computation over synthetic history -- no network, no real CSV needed."""
+
+    @staticmethod
+    def _directional_history(n_days=10):
+        """AAA gains 2%/day (bullish, high score); BBB loses 2%/day
+        (bearish, low score) -- deterministic, so hit rates should be
+        exactly 100% and the score-bucket split should be clean."""
+        rows = []
+        price_a, price_b = 100.0, 100.0
+        for d in range(1, n_days + 1):
+            date = f'2026-01-{d:02d}'
+            rows.append({'date': date, 'symbol': 'AAA', 'price': price_a,
+                        'overall_signal': 'bullish', 'score': 85,
+                        'score_value': 85, 'score_quality': 85, 'score_momentum': 85,
+                        'score_dividend': 85, 'score_liquidity': 85})
+            rows.append({'date': date, 'symbol': 'BBB', 'price': price_b,
+                        'overall_signal': 'bearish', 'score': 10,
+                        'score_value': 10, 'score_quality': 10, 'score_momentum': 10,
+                        'score_dividend': 10, 'score_liquidity': 10})
+            price_a *= 1.02
+            price_b *= 0.98
+        return pd.DataFrame(rows)
+
+    @staticmethod
+    def _score_proportional_history(n_days=10):
+        """5 symbols whose daily return is proportional to their (constant)
+        score -- score should end up strongly positively correlated with
+        forward return at any horizon within range."""
+        rows = []
+        for score in (10, 30, 50, 70, 90):
+            daily_return = (score - 50) / 1000  # score 90 -> +4%/day, 10 -> -4%/day
+            price = 100.0
+            sym = f'S{score}'
+            signal = 'bullish' if score >= 60 else 'bearish' if score <= 40 else 'neutral'
+            for d in range(1, n_days + 1):
+                rows.append({'date': f'2026-01-{d:02d}', 'symbol': sym, 'price': price,
+                            'overall_signal': signal, 'score': score,
+                            'score_value': score, 'score_quality': score,
+                            'score_momentum': score, 'score_dividend': score,
+                            'score_liquidity': score})
+                price *= (1 + daily_return)
+        return pd.DataFrame(rows)
+
+    def test_forward_return_computation(self):
+        from backtest import _forward_return_for_horizon
+        df = self._directional_history(n_days=10)
+        out = _forward_return_for_horizon(df, 5)
+        first_aaa = out[out['symbol'] == 'AAA'].iloc[0]
+        expected = (1.02 ** 5 - 1) * 100
+        self.assertAlmostEqual(first_aaa['fwd_return_5'], expected, places=6)
+        # The last 5 rows of each symbol have no row 5 runs ahead yet.
+        self.assertTrue(out[out['symbol'] == 'AAA']['fwd_return_5'].tail(5).isna().all())
+
+    def test_hit_rate_perfect_directional_data(self):
+        from backtest import _forward_return_for_horizon, hit_rate_by_signal
+        df = self._directional_history(n_days=10)
+        out = _forward_return_for_horizon(df, 5)
+        hr = hit_rate_by_signal(out, 5)
+        self.assertEqual(hr['bullish']['hit_rate'], 100.0)
+        self.assertEqual(hr['bearish']['hit_rate'], 100.0)
+
+    def test_score_bucket_returns(self):
+        from backtest import _forward_return_for_horizon, avg_return_by_score_bucket
+        df = self._directional_history(n_days=10)
+        out = _forward_return_for_horizon(df, 5)
+        buckets = avg_return_by_score_bucket(out, 5)
+        self.assertIn('80-100', buckets)
+        self.assertIn('0-20', buckets)
+        self.assertGreater(buckets['80-100']['avg_return'], 0)
+        self.assertLess(buckets['0-20']['avg_return'], 0)
+
+    def test_factor_correlation_positive(self):
+        from backtest import _forward_return_for_horizon, factor_correlation
+        df = self._score_proportional_history(n_days=10)
+        out = _forward_return_for_horizon(df, 5)
+        corr = factor_correlation(out, 5)
+        for factor in ('value', 'quality', 'momentum', 'dividend', 'liquidity'):
+            self.assertIn(factor, corr)
+            self.assertGreater(corr[factor]['correlation'], 0.9)
+
+    def test_factor_correlation_missing_column_skipped(self):
+        """A history DataFrame from before sub-scores were tracked (no
+        score_value etc. columns) must not raise -- those factors are
+        just absent from the result, not an error."""
+        from backtest import _forward_return_for_horizon, factor_correlation
+        df = self._directional_history(n_days=10).drop(columns=['score_value'])
+        out = _forward_return_for_horizon(df, 5)
+        corr = factor_correlation(out, 5)
+        self.assertNotIn('value', corr)
+        self.assertIn('quality', corr)
+
+    def test_insufficient_history_empty(self):
+        from backtest import run_backtest
+        summary = run_backtest(pd.DataFrame())
+        self.assertEqual(summary['days_recorded'], 0)
+        for h in (5, 20, 60):
+            self.assertEqual(summary['horizons'][h]['status'], 'insufficient_history')
+
+    def test_insufficient_history_none(self):
+        from backtest import run_backtest
+        summary = run_backtest(None)
+        self.assertEqual(summary['days_recorded'], 0)
+
+    def test_insufficient_history_too_few_days_for_horizon(self):
+        """3 days recorded -> the 5-day horizon can't have a single pair
+        yet, but must degrade gracefully, not raise or divide by zero."""
+        from backtest import run_backtest
+        df = self._directional_history(n_days=3)
+        summary = run_backtest(df, horizons=(5,))
+        self.assertEqual(summary['days_recorded'], 3)
+        self.assertEqual(summary['horizons'][5]['status'], 'insufficient_history')
+
+    def test_run_backtest_ok_status_with_enough_history(self):
+        from backtest import run_backtest
+        df = self._directional_history(n_days=10)
+        summary = run_backtest(df, horizons=(5,))
+        self.assertEqual(summary['horizons'][5]['status'], 'ok')
+        self.assertGreater(summary['horizons'][5]['n_pairs'], 0)
+        self.assertIn('hit_rate', summary['horizons'][5])
+        self.assertIn('score_buckets', summary['horizons'][5])
+        self.assertIn('factor_correlation', summary['horizons'][5])
+
+
 class TestReportGenerator(unittest.TestCase):
     """Test report generation."""
 
@@ -574,6 +735,8 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestAnalysisEngine))
     suite.addTests(loader.loadTestsFromTestCase(TestSectorAnalysis))
     suite.addTests(loader.loadTestsFromTestCase(TestScoring))
+    suite.addTests(loader.loadTestsFromTestCase(TestHistoryTracker))
+    suite.addTests(loader.loadTestsFromTestCase(TestBacktest))
     suite.addTests(loader.loadTestsFromTestCase(TestReportGenerator))
     suite.addTests(loader.loadTestsFromTestCase(TestEmailNotifier))
     suite.addTests(loader.loadTestsFromTestCase(TestTelegramNotifier))

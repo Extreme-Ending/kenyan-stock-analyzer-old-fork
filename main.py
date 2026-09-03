@@ -212,14 +212,18 @@ def main():
             except Exception as e:
                 logger.warning(f"Scoring skipped: {e}")
 
-        # ---- Persist daily history snapshot ----
+        # ---- Persist daily history snapshot + accuracy backtest ----
+        backtest_summary = None
         if config.enable_history:
             try:
                 from history_tracker import HistoryTracker
                 ht = HistoryTracker(data_dir=config.cache_dir)
                 ht.record_snapshot(analysis_results, fundamentals_data, scores, validations)
+
+                from backtest import run_backtest
+                backtest_summary = run_backtest(ht.load_history())
             except Exception as e:
-                logger.warning(f"History snapshot skipped: {e}")
+                logger.warning(f"History snapshot/backtest skipped: {e}")
 
         # ---- Individual reports (only if --detailed) ----
         report_files = {}
@@ -275,6 +279,7 @@ def main():
             scores=scores,
             alerts=alerts,
             usd_kes=usd_kes,
+            backtest_summary=backtest_summary,
         )
 
         # ---- Email ----

@@ -947,7 +947,8 @@ ul {{ margin: 4px 0; padding-left: 18px; }} li {{ margin: 2px 0; }}
 
     def generate_index(self, analysis_results, sector_data=None, breadth=None,
                        report_files=None, fundamentals_data=None,
-                       validations=None, scores=None, alerts=None, usd_kes=None):
+                       validations=None, scores=None, alerts=None, usd_kes=None,
+                       backtest_summary=None):
         """
         Generate the main index.html dashboard — the single entry point.
 
@@ -956,6 +957,10 @@ ul {{ margin: 4px 0; padding-left: 18px; }} li {{ margin: 2px 0; }}
 
         Args:
             fundamentals_data: dict from FundamentalAnalysis.fetch_all_fundamentals().
+            backtest_summary: dict from backtest.run_backtest(), or None to
+                skip the Track Record page's stats (shown as "not enabled"
+                rather than omitting the page, since a stock report may
+                still link to it).
 
         Returns:
             str: Path to index.html.
@@ -1062,6 +1067,7 @@ ul {{ margin: 4px 0; padding-left: 18px; }} li {{ margin: 2px 0; }}
             breadth=breadth, sector_chart=sector_chart, bullish=bullish,
             bearish=bearish, neutral=neutral, total=len(stocks),
             data_date=data_date, alerts=alerts, usd_kes=usd_kes,
+            backtest_summary=backtest_summary,
         )
         return index_path
 
@@ -1079,6 +1085,7 @@ ul {{ margin: 4px 0; padding-left: 18px; }} li {{ margin: 2px 0; }}
         ('pulse.html', '🧭 Market Pulse'),
         ('bonds.html', '🏦 Govt Bonds'),
         ('quality.html', '✅ Data Quality'),
+        ('track_record.html', '🎯 Track Record'),
     ]
 
     # Inline SVG favicon — an ascending green bar chart on a dark tile (a
@@ -2749,9 +2756,99 @@ tr:hover { background: #f8fafc; }
             + compare_js
         )
 
+    def _build_track_record_body(self, backtest_summary):
+        """
+        The Track Record tab: does this tool's own scoring/signals actually
+        predict anything? Built from backtest.run_backtest()'s output over
+        data/history/daily_snapshots.csv -- every stat here is this tool
+        grading its own past calls (IMPROVEMENTS.txt item 2), never a live
+        source. Degrades to an explanatory "not enough history yet" message
+        per horizon rather than a misleading stat computed from too little
+        data (see run_backtest's own fail-safe 'insufficient_history' status).
+        """
+        intro = (
+            "<p class='page-intro'>Does this tool's own scoring actually predict anything? "
+            "This page joins the daily snapshot history against itself N trading days forward "
+            "and reports how the signals and scores shown at the time actually performed. "
+            "Purely descriptive of this tool's own past calls — not a live source, not "
+            "investment advice, and meaningless until enough history has accumulated.</p>"
+        )
+        if not backtest_summary:
+            return intro + (
+                "<div class='section'><h2>🎯 Track Record</h2>"
+                "<p class='dq-note'>History tracking is disabled or hasn't produced a result "
+                "yet (ENABLE_HISTORY in .env) — once it's on, this page fills in as daily "
+                "snapshots accumulate.</p></div>"
+            )
+        days = backtest_summary.get('days_recorded', 0)
+        horizons_html = ''.join(
+            self._track_record_horizon_section(horizon, stats, days)
+            for horizon, stats in sorted((backtest_summary.get('horizons') or {}).items())
+        )
+        return (
+            intro
+            + "<div class='section'><h2>🎯 Track Record</h2>"
+            f"<p class='dq-note'>{days} trading day(s) of history recorded so far.</p></div>"
+            + horizons_html
+        )
+
+    def _track_record_horizon_section(self, horizon, stats, days_recorded):
+        """One horizon's card (e.g. 5 trading days forward) for the Track Record page."""
+        title = f"{horizon}-Day Forward Look"
+        if stats.get('status') != 'ok':
+            needed = horizon + 1 - days_recorded
+            more = f" ({needed} more trading day(s) to go)" if needed > 0 else ''
+            return (
+                f"<div class='section'><h2>{title}</h2>"
+                f"<p class='dq-note'>Not enough history yet — need {horizon + 1} trading days "
+                f"recorded to compute this, have {days_recorded}{more}.</p></div>"
+            )
+
+        def row(cells):
+            return '<tr>' + ''.join(cells) + '</tr>'
+
+        hit_rows = ''.join(
+            row([f"<td><span class='badge {signal}'>{signal}</span></td>",
+                f"<td class='{'fgood' if d['hit_rate'] >= 55 else 'fbad' if d['hit_rate'] < 45 else 'fmid'}'>{d['hit_rate']}%</td>",
+                f"<td>{d['n']}</td>"])
+            for signal, d in (stats.get('hit_rate') or {}).items()
+        ) or "<tr><td colspan='3'>No data yet</td></tr>"
+
+        bucket_rows = ''.join(
+            row([f"<td>{bucket}</td>",
+                f"<td class='{'fgood' if d['avg_return'] > 0 else 'fbad' if d['avg_return'] < 0 else 'fmid'}'>{d['avg_return']:+.2f}%</td>",
+                f"<td>{d['n']}</td>"])
+            for bucket, d in (stats.get('score_buckets') or {}).items()
+        ) or "<tr><td colspan='3'>No data yet</td></tr>"
+
+        factor_rows = ''.join(
+            row([f"<td>{factor.title()}</td>",
+                f"<td class='{'fgood' if d['correlation'] > 0.1 else 'fbad' if d['correlation'] < -0.1 else 'fmid'}'>{d['correlation']:+.3f}</td>",
+                f"<td>{d['n']}</td>"])
+            for factor, d in (stats.get('factor_correlation') or {}).items()
+        ) or "<tr><td colspan='3'>No data yet</td></tr>"
+
+        return (
+            f"<div class='section'><h2>{title}</h2>"
+            f"<p class='dq-note'>{stats.get('n_pairs', 0)} (stock, day) pairs with a known "
+            "outcome this far ahead.</p>"
+            "<div class='grid-2'>"
+            "<div><h3 style='font-size:0.85rem;margin-bottom:8px;'>Hit rate by signal "
+            "<span style='font-weight:400;color:#94a3b8;'>(bullish = positive return, "
+            "bearish = negative, neutral = within ±2%)</span></h3>"
+            f"<table><tr><th>Signal</th><th>Hit rate</th><th>n</th></tr>{hit_rows}</table></div>"
+            "<div><h3 style='font-size:0.85rem;margin-bottom:8px;'>Avg return by score bucket</h3>"
+            f"<table><tr><th>Score</th><th>Avg return</th><th>n</th></tr>{bucket_rows}</table></div>"
+            "</div>"
+            "<h3 style='font-size:0.85rem;margin:14px 0 8px;'>Factor correlation with forward return</h3>"
+            f"<table><tr><th>Factor</th><th>Correlation</th><th>n</th></tr>{factor_rows}</table>"
+            "</div>"
+        )
+
     def _build_dashboard_pages(self, stocks, gainers, losers, sectors, breadth,
                                sector_chart, bullish, bearish, neutral, total,
-                               data_date=None, alerts=None, usd_kes=None):
+                               data_date=None, alerts=None, usd_kes=None,
+                               backtest_summary=None):
         """
         Build the multi-page dashboard: a clean Overview plus grouped detail
         pages (Technicals, Fundamentals, Dividends, Sectors, Data Quality).
@@ -3231,6 +3328,9 @@ tr:hover { background: #f8fafc; }
         # ---- COMPARE page (pick 2-3 stocks, side by side) ----
         compare_body = self._build_compare_body(stocks)
 
+        # ---- TRACK RECORD page (accuracy backtest, IMPROVEMENTS.txt item 2) ----
+        track_record_body = self._build_track_record_body(backtest_summary)
+
         # ---- Assemble & write all pages ----
         pages = {
             'index.html': self._page_shell('NSE Dashboard — Overview', 'index.html', subtitle, overview_body, with_filter=True),
@@ -3245,6 +3345,7 @@ tr:hover { background: #f8fafc; }
             'pulse.html': self._page_shell('NSE — Market Pulse', 'pulse.html', subtitle, pulse_body),
             'bonds.html': self._page_shell('NSE — Government Bonds', 'bonds.html', subtitle, bonds_body),
             'quality.html': self._page_shell('NSE — Data Quality', 'quality.html', subtitle, quality_body),
+            'track_record.html': self._page_shell('NSE — Track Record', 'track_record.html', subtitle, track_record_body),
         }
         for filename, html in pages.items():
             with open(os.path.join(self.output_dir, filename), 'w', encoding='utf-8') as f:
