@@ -89,6 +89,159 @@ class TestUtils(unittest.TestCase):
         self.assertEqual(call_count[0], 3)
 
 
+class TestOutlierFiltering(unittest.TestCase):
+    """Test OHLCV outlier/bad-tick filtering (IMPROVEMENTS.txt item 7).
+    Pure computation over synthetic data -- no network."""
+
+    @staticmethod
+    def _clean_series(days=30, base=100.0, daily_move=0.3, seed=1):
+        """A calm, low-volatility price series with steady volume."""
+        np.random.seed(seed)
+        dates = pd.date_range('2026-01-01', periods=days, freq='B')
+        closes = base + np.cumsum(np.random.uniform(-daily_move, daily_move, days))
+        return pd.DataFrame({
+            'open': closes, 'high': closes + 0.5, 'low': closes - 0.5,
+            'close': closes, 'volume': 100_000,
+        }, index=dates)
+
+    def test_no_change_on_clean_data(self):
+        from utils import filter_ohlcv_outliers
+        df = self._clean_series()
+        clean, dropped = filter_ohlcv_outliers(df)
+        self.assertEqual(dropped, 0)
+        self.assertEqual(len(clean), len(df))
+
+    def test_drops_high_below_low(self):
+        from utils import filter_ohlcv_outliers
+        df = self._clean_series()
+        df.iloc[10, df.columns.get_loc('high')] = df.iloc[10]['low'] - 1
+        clean, dropped = filter_ohlcv_outliers(df)
+        self.assertEqual(dropped, 1)
+        self.assertEqual(len(clean), len(df) - 1)
+
+    def test_drops_close_outside_range(self):
+        from utils import filter_ohlcv_outliers
+        df = self._clean_series()
+        df.iloc[10, df.columns.get_loc('close')] = df.iloc[10]['high'] + 50
+        clean, dropped = filter_ohlcv_outliers(df)
+        self.assertEqual(dropped, 1)
+
+    def test_drops_open_outside_range(self):
+        from utils import filter_ohlcv_outliers
+        df = self._clean_series()
+        df.iloc[10, df.columns.get_loc('open')] = df.iloc[10]['low'] - 50
+        clean, dropped = filter_ohlcv_outliers(df)
+        self.assertEqual(dropped, 1)
+
+    def test_drops_extreme_move_without_volume_spike(self):
+        from utils import filter_ohlcv_outliers
+        df = self._clean_series(days=30)
+        idx = 25
+        bad_price = df.iloc[idx]['close'] * 10
+        for col in ('open', 'close'):
+            df.iloc[idx, df.columns.get_loc(col)] = bad_price
+        df.iloc[idx, df.columns.get_loc('high')] = bad_price + 1
+        df.iloc[idx, df.columns.get_loc('low')] = bad_price - 1
+        # volume stays at the normal 100_000 -- no matching spike
+        clean, dropped = filter_ohlcv_outliers(df)
+        self.assertGreaterEqual(dropped, 1)
+        self.assertNotIn(df.index[idx], clean.index)
+
+    def test_keeps_extreme_move_with_matching_volume_spike(self):
+        """A huge move on huge volume is a real event (earnings, corporate
+        action) -- must be kept, not dropped."""
+        from utils import filter_ohlcv_outliers
+        df = self._clean_series(days=30)
+        idx = 25
+        bad_price = df.iloc[idx]['close'] * 10
+        for col in ('open', 'close'):
+            df.iloc[idx, df.columns.get_loc(col)] = bad_price
+        df.iloc[idx, df.columns.get_loc('high')] = bad_price + 1
+        df.iloc[idx, df.columns.get_loc('low')] = bad_price - 1
+        df.iloc[idx, df.columns.get_loc('volume')] = 100_000 * 10
+        clean, dropped = filter_ohlcv_outliers(df)
+        self.assertIn(df.index[idx], clean.index)
+
+    def test_persisting_real_move_not_dropped_even_if_statistically_extreme(self):
+        """Regression case found against real NSE data (EQTY, 2026-05-25):
+        an ordinary-looking ~6.6% drop after an unusually calm month
+        registered as an 8-sigma 'anomaly' on the sigma+volume check alone,
+        but the price never reverted -- it held at the new level, which is
+        the signature of a real repricing, not a bad print. Requiring
+        reversion is what tells these apart; a persisting move must never
+        be dropped just for being statistically large."""
+        from utils import filter_ohlcv_outliers
+        # An unusually calm run (tiny, near-constant daily moves) so the
+        # rolling std is small enough that an ordinary ~6% move registers
+        # as many sigma -- exactly the real-world setup that caused this.
+        dates = pd.date_range('2026-01-01', periods=30, freq='B')
+        closes = [100.0 + 0.01 * i for i in range(25)]  # dead calm
+        closes += [93.4, 93.4, 93.4, 93.4, 93.4]  # real ~6.6% drop, then holds
+        df = pd.DataFrame({
+            'open': closes, 'high': [c + 0.3 for c in closes],
+            'low': [c - 0.3 for c in closes], 'close': closes,
+            'volume': 100_000,
+        }, index=dates)
+        clean, dropped = filter_ohlcv_outliers(df)
+        self.assertEqual(dropped, 0)
+        self.assertEqual(len(clean), len(df))
+
+    def test_short_history_skips_statistical_check(self):
+        """Fewer than 15 bars -- can't judge 'normal' volatility yet, so
+        the statistical check is skipped; an internally-consistent (if
+        large) bar is left alone rather than guessed at."""
+        from utils import filter_ohlcv_outliers
+        df = self._clean_series(days=10)
+        idx = 5
+        for col in ('open', 'high', 'low', 'close'):
+            df.iloc[idx, df.columns.get_loc(col)] = df.iloc[idx][col] * 50
+        clean, dropped = filter_ohlcv_outliers(df)
+        self.assertEqual(dropped, 0)
+        self.assertEqual(len(clean), len(df))
+
+    def test_empty_and_none_input(self):
+        from utils import filter_ohlcv_outliers
+        clean, dropped = filter_ohlcv_outliers(None)
+        self.assertIsNone(clean)
+        self.assertEqual(dropped, 0)
+        clean, dropped = filter_ohlcv_outliers(pd.DataFrame())
+        self.assertTrue(clean.empty)
+        self.assertEqual(dropped, 0)
+
+    def test_malformed_dataframe_fails_safe(self):
+        """Missing required columns must not raise -- returns the original
+        frame unchanged rather than corrupting or crashing."""
+        from utils import filter_ohlcv_outliers
+        df = pd.DataFrame({'close': [1, 2, 3]})
+        clean, dropped = filter_ohlcv_outliers(df)
+        self.assertEqual(dropped, 0)
+        pd.testing.assert_frame_equal(clean, df)
+
+
+class TestDataAcquisition(unittest.TestCase):
+    """Test the outlier-filter wiring into the fetch path (the
+    data_acquisition.py half of IMPROVEMENTS.txt item 7). Mocks the
+    source fetch -- never hits a real network source."""
+
+    def test_fetch_stock_data_filters_outliers_before_caching(self):
+        from data_acquisition import DataAcquisition
+        with tempfile.TemporaryDirectory() as tmp:
+            da = DataAcquisition(data_sources=['tradingview'], cache_dir=tmp)
+            np.random.seed(1)
+            dates = pd.date_range('2026-01-01', periods=20, freq='B')
+            closes = 100 + np.cumsum(np.random.uniform(-0.3, 0.3, 20))
+            df = pd.DataFrame({
+                'open': closes, 'high': closes + 0.5, 'low': closes - 0.5,
+                'close': closes, 'volume': 100_000,
+            }, index=dates)
+            df.iloc[5, df.columns.get_loc('high')] = df.iloc[5]['low'] - 1  # bad bar
+
+            with patch.object(da, '_fetch_from_source', return_value=df):
+                result = da.fetch_stock_data('TEST', force_refresh=True)
+
+            self.assertEqual(len(result), 19)
+
+
 class TestAnalysisEngine(unittest.TestCase):
     """Test technical analysis calculations."""
 
@@ -861,6 +1014,8 @@ def run_tests():
     suite = unittest.TestSuite()
     suite.addTests(loader.loadTestsFromTestCase(TestConfig))
     suite.addTests(loader.loadTestsFromTestCase(TestUtils))
+    suite.addTests(loader.loadTestsFromTestCase(TestOutlierFiltering))
+    suite.addTests(loader.loadTestsFromTestCase(TestDataAcquisition))
     suite.addTests(loader.loadTestsFromTestCase(TestAnalysisEngine))
     suite.addTests(loader.loadTestsFromTestCase(TestSectorAnalysis))
     suite.addTests(loader.loadTestsFromTestCase(TestScoring))

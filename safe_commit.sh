@@ -55,6 +55,18 @@ git commit -m "$MSG"
 echo
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+
+# One-time nudge: without a credential helper, every push re-prompts for a
+# username/PAT. Never set this automatically (git config changes are the
+# user's call, not a script's) -- just make the fix impossible to miss.
+if [ -z "$(git config --get credential.helper 2>/dev/null)" ]; then
+  echo "Note: no git credential helper is configured, so the push below may"
+  echo "ask for your username/token again. To stop that happening every"
+  echo "time, run this once (caches it in ~/.git-credentials):"
+  echo "  git config --global credential.helper store"
+  echo
+fi
+
 read -r -p "Push '$BRANCH' to origin now? [y/N] " CONFIRM
 if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
   if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then

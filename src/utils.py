@@ -220,3 +220,93 @@ def _cluster_levels(levels, threshold):
             current_cluster = [level]
     clusters.append(sum(current_cluster) / len(current_cluster))
     return [round(c, 2) for c in clusters]
+
+
+def filter_ohlcv_outliers(df, symbol=None, std_threshold=6.0, min_move_pct=15.0,
+                          volume_spike_factor=3.0):
+    """
+    Flag and drop anomalous OHLCV bars before they reach indicator
+    calculations — a single bad print (stale duplicate, decimal error,
+    erroneous spike) can otherwise distort RSI/MACD/Bollinger/ATR for the
+    rest of the lookback window (see IMPROVEMENTS.txt item 7).
+
+    Two kinds of check:
+      - Absolute sanity: high < low, or close/open outside [low, high].
+        Physically impossible regardless of history length.
+      - Statistical: a single-day return of at least `min_move_pct` that is
+        ALSO beyond `std_threshold` standard deviations of THIS stock's own
+        trailing 20-day volatility (never one flat threshold for every
+        stock — an illiquid counter is naturally more volatile than a blue
+        chip), AND the price right after it reverts close to where it was
+        right before it (a bad print snaps back; a real repricing persists
+        at the new level), AND that day has no matching volume spike
+        (>= volume_spike_factor x the trailing average volume, since a huge
+        move on huge volume is a real event like earnings or a corporate
+        action). All four must hold. Only applied once there are at least
+        15 bars to judge "normal" volatility from.
+
+        The absolute `min_move_pct` floor exists because the sigma check
+        alone false-positived twice against real NSE data during testing:
+        an ordinary ~4-7% single-day move, following an unusually calm
+        stretch, registered as a 6-8 sigma "anomaly" purely because the
+        recent volatility baseline was small — even with the reversion
+        check, a real spike-then-partial-fade (completely normal price
+        action) can look similar. A move under min_move_pct is never worth
+        dropping regardless of how many sigma it measures; real bad prints
+        (decimal errors, wrong-symbol duplicates) are typically far larger.
+
+    Args:
+        df: OHLCV DataFrame (columns: open, high, low, close, volume).
+        symbol: Ticker, for logging only.
+        std_threshold: How many standard deviations of the stock's own
+            recent daily-return volatility counts as anomalous.
+        min_move_pct: Minimum single-day |return|, in percent, before a bar
+            is even considered a candidate outlier.
+        volume_spike_factor: A move is kept (not dropped) if that day's
+            volume is at least this multiple of the trailing average.
+
+    Returns:
+        (clean_df, dropped_count): clean_df is a new DataFrame with
+        anomalous rows removed (the input is never mutated); dropped_count
+        is how many rows were dropped, for logging. Fails safe: any error
+        during filtering returns the original df unchanged and 0 dropped,
+        rather than raising or risking corrupting good data.
+    """
+    if df is None or df.empty:
+        return df, 0
+    try:
+        clean = df.copy()
+
+        bad = clean['high'] < clean['low']
+        for col in ('close', 'open'):
+            if col in clean.columns:
+                bad = bad | (clean[col] > clean['high']) | (clean[col] < clean['low'])
+
+        if len(clean) >= 15 and 'volume' in clean.columns:
+            returns = clean['close'].pct_change()
+            rolling_std = returns.rolling(20, min_periods=10).std().shift(1)
+            rolling_vol = clean['volume'].rolling(20, min_periods=10).mean().shift(1)
+            is_large_enough = returns.abs() >= (min_move_pct / 100.0)
+            is_extreme_move = (rolling_std > 0) & (returns.abs() > std_threshold * rolling_std)
+
+            # Require reversion too: a bad print snaps back (the price right
+            # after the anomaly returns close to where it was right before
+            # it); a real repricing persists at the new level instead.
+            pre_price = clean['close'].shift(1)
+            post_price = clean['close'].shift(-1)
+            move_into = (clean['close'] - pre_price).abs()
+            move_out = (post_price - pre_price).abs()
+            reverts_next_bar = (move_out < 0.5 * move_into).fillna(False)
+
+            has_volume_spike = (clean['volume'] >= (volume_spike_factor * rolling_vol)).fillna(False)
+            bad = bad | (is_large_enough & is_extreme_move.fillna(False) & reverts_next_bar & ~has_volume_spike)
+
+        bad = bad.fillna(False)
+        dropped = int(bad.sum())
+        if dropped:
+            logger.warning(f"  {symbol or '?'}: dropped {dropped} anomalous OHLCV bar(s)")
+            clean = clean[~bad]
+        return clean, dropped
+    except Exception as e:
+        logger.warning(f"OHLCV outlier filter failed for {symbol or '?'}: {e} — using data as-is")
+        return df, 0

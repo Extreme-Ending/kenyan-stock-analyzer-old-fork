@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from logger import get_logger
-from utils import retry, safe_float
+from utils import retry, safe_float, filter_ohlcv_outliers
 
 load_dotenv()
 logger = get_logger(__name__)
@@ -104,6 +104,13 @@ class DataAcquisition:
             logger.debug(f"Trying {source} for {symbol}")
             data = self._fetch_from_source(source, symbol, period, interval)
             if data is not None and not data.empty:
+                # Drop anomalous bars (bad prints, decimal errors, stale
+                # duplicates) before this data ever reaches indicator
+                # calculations or the cache — see IMPROVEMENTS.txt item 7.
+                data, _ = filter_ohlcv_outliers(data, symbol=symbol)
+                if data.empty:
+                    logger.warning(f"  {source} data for {symbol} was entirely anomalous, skipping")
+                    continue
                 # Cache the result
                 if interval == '1d':
                     self._save_to_cache(symbol, data)

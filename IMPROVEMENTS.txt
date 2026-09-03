@@ -197,6 +197,34 @@ drop bars where high < low, close outside [low, high], or a single-day
 move beyond N standard deviations of recent volatility with no matching
 volume spike) before feeding the data into AnalysisEngine.
 
+STATUS (2026-09-04): Done. New utils.filter_ohlcv_outliers(): absolute
+sanity (high<low, close/open outside [low,high]) always applies;
+statistical outlier detection (>=15 bars needed to judge "normal"
+volatility) requires ALL of: the move is >= min_move_pct (15%, see
+below), beyond std_threshold (6.0) standard deviations of the stock's
+own trailing 20-day volatility (never one flat threshold for every
+stock), the price reverts close to its pre-anomaly level the very next
+bar (a bad print snaps back; a real repricing persists), and no matching
+volume spike (>=3x trailing average -- a huge move on huge volume is a
+real event, not a bad print). Wired into data_acquisition.py's
+fetch_stock_data() -- the single choke point every source (TradingView/
+NSE PDF/Yahoo) passes through -- so cached data is always the filtered
+result, applied before AnalysisEngine ever sees the bars.
+
+The min_move_pct floor exists because live testing against real NSE
+data caught two false positives the sigma+volume-spike design alone
+(the spec's own literal suggestion) did NOT catch: an ordinary ~6.6%
+EQTY move and a ~4% ABSA move, both after unusually calm stretches,
+registered as 6-8 sigma "anomalies" purely because the recent
+volatility baseline was small -- normal price action, not data errors.
+Added the reversion check first (didn't fully fix it: a real spike-
+then-partial-fade can look similar), then the 15% absolute floor
+(real bad prints -- decimal errors, wrong-symbol duplicates -- are
+typically far larger than ordinary daily moves regardless of local
+volatility). Re-verified clean (0 drops) across the full 57-stock
+universe after the fix. 11 tests, including one that directly encodes
+the EQTY regression case so it can never silently reappear.
+
 
 8. NO SHORT-TERM VS LONG-TERM HORIZON CLASSIFICATION
 --------------------------------------------------------------
