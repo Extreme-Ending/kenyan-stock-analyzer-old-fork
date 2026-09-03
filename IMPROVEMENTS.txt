@@ -174,6 +174,25 @@ for transparency — consistent with the "reasons" transparency pattern
 already used elsewhere in scoring.py). Display it next to the existing
 score/signal on the dashboard and individual stock reports.
 
+STATUS (2026-09-03): Done. score_stock() now always returns a `horizon`
+dict ({label, period, drivers, reason}) via new _classify_horizon()/
+_short_term_trigger() in scoring.py -- rule-based on which sub-scores
+dominate (momentum >=65 alone -> SHORT-TERM, period tied to the specific
+trigger: MACD bullish cross "1-4 weeks", golden cross "1-3 months", RSI
+oversold "days"; value+quality+dividend all >=65 avg and each >=50 ->
+LONG-TERM "6-12+ months"; both strong -> LONG-TERM with a tailwind note;
+explicit conflicts, e.g. the spec's own "cheap fundamentally but bearish
+technically" example -> MIXED, never forced into one label; no data ->
+UNCLEAR). Displayed in all four places the spec asked for: Overview
+table's new sortable Horizon column (color-coded badge), the Overview
+hover tooltip, the Compare tab (label/period/reason rows), and a new
+"Horizon" card on individual stock report pages (also fixed: those
+pages' nav bar was missing the Compare tab link, added while in there).
+8 new tests (short-term w/ MACD-cross and RSI-oversold triggers,
+long-term alone and with tailwind, both MIXED conflict directions,
+UNCLEAR, and wiring into score_stock()). Verified against a real
+57-stock build + individual stock report + headless-browser screenshots.
+
 
 PRIORITY ORDER (suggested)
 --------------------------------------------------------------

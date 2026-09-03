@@ -1145,6 +1145,10 @@ tr:hover { background: #f8fafc; }
 .strong_sell { background: #dc2626; color: #fff; }
 .undefined { background: #f1f5f9; color: #64748b; }
 .high_volume { background: #ede9fe; color: #5b21b6; }
+.horizon-short { background: #dbeafe; color: #1e40af; }
+.horizon-long { background: #dcfce7; color: #166534; }
+.horizon-mixed { background: #fef3c7; color: #92400e; }
+.horizon-unclear { background: #f1f5f9; color: #64748b; }
 .low_volume { background: #f1f5f9; color: #64748b; }
 /* Score chips */
 .score { display: inline-block; min-width: 30px; padding: 2px 8px; border-radius: 10px; font-weight: 700; font-size: 0.75rem; text-align: center; }
@@ -1310,19 +1314,22 @@ tr:hover { background: #f8fafc; }
             f'<a href="{fn}" class="nav-item{" active" if fn == active_file else ""}">{lbl}</a>'
             for fn, lbl in self._NAV
         )
-        # Text search always applies; the sector/signal selects are optional
-        # (only the Overview page has them) -- when absent, filtering is
-        # exactly the search-only behavior every other page already has.
+        # Text search always applies; the sector/signal/horizon selects are
+        # optional (only the Overview page has them) -- when absent,
+        # filtering is exactly the search-only behavior every other page
+        # already has.
         filter_js = ("function filterTable(){var i=document.getElementById('search');"
                      "var q=i?i.value.toLowerCase():'';"
                      "var sf=document.getElementById('sectorFilter');var sv=sf?sf.value:'';"
                      "var gf=document.getElementById('signalFilter');var gv=gf?gf.value:'';"
+                     "var hf=document.getElementById('horizonFilter');var hv=hf?hf.value:'';"
                      "var rows=document.querySelectorAll('#mainTable tbody tr');"
                      "rows.forEach(function(r){"
                      "var textOk=!q||r.textContent.toLowerCase().indexOf(q)>-1;"
                      "var sectorOk=!sv||r.getAttribute('data-sector')===sv;"
                      "var signalOk=!gv||r.getAttribute('data-signal')===gv;"
-                     "r.style.display=(textOk&&sectorOk&&signalOk)?'':'none';});}"
+                     "var horizonOk=!hv||r.getAttribute('data-horizon')===hv;"
+                     "r.style.display=(textOk&&sectorOk&&signalOk&&horizonOk)?'':'none';});}"
                      ) if with_filter else ""
         # Floating hover-tooltip (rich, never clipped by scroll containers) +
         # sticky-topbar shadow toggle. Reads HTML from each element's data-tip.
@@ -2334,6 +2341,14 @@ tr:hover { background: #f8fafc; }
                 col = "#22c55e" if v >= 70 else "#f59e0b" if v >= 45 else "#ef4444"
                 p.append(f"<div class='tt-row'><span class='tt-k'>{label}</span><span>{v}/100</span></div>"
                          f"<div class='tt-bar'><span style='width:{v}%;background:{col}'></span></div>")
+            horizon = sd.get("horizon")
+            if horizon:
+                hc = {'SHORT-TERM': '#3b82f6', 'LONG-TERM': '#22c55e',
+                     'MIXED': '#f59e0b', 'UNCLEAR': '#94a3b8'}.get(horizon['label'], '#94a3b8')
+                period = f" · {horizon['period']}" if horizon.get('period') else ''
+                p.append(f"<div class='tt-row'><span class='tt-k'>Horizon</span>"
+                         f"<span style='color:{hc};font-weight:700'>{horizon['label']}{period}</span></div>")
+                p.append(f"<div class='tt-note'>{horizon['reason']}</div>")
             reasons = sd.get("reasons") or {}
             allr = []
             for key in ("value", "quality", "momentum", "dividend", "liquidity"):
@@ -2640,12 +2655,16 @@ tr:hover { background: #f8fafc; }
         for s in stocks:
             sd = s.get('score_detail') or {}
             reasons = sd.get('reasons') or {}
+            horizon = sd.get('horizon') or {}
             compare_data[s['symbol']] = {
                 'sector': s.get('sector') or None,
                 'price': s.get('price'),
                 'change': s.get('change'),
                 'signal_label': s.get('signal_label', 'N/A'),
                 'overall': sd.get('overall'),
+                'horizon_label': horizon.get('label'),
+                'horizon_period': horizon.get('period'),
+                'horizon_reason': horizon.get('reason'),
                 'value': sd.get('value'),
                 'quality': sd.get('quality'),
                 'momentum': sd.get('momentum'),
@@ -2680,7 +2699,10 @@ tr:hover { background: #f8fafc; }
             "<script>"
             f"var CMP_DATA={data_json};"
             "var CMP_METRICS=[['sector','Sector'],['price','Price (KES)'],['change','Change %'],"
-            "['signal_label','TV Signal'],['overall','Score (0-100)'],['value','— Value'],"
+            "['signal_label','TV Signal'],['overall','Score (0-100)'],"
+            "['horizon_label','Horizon'],['horizon_period','Suggested period'],"
+            "['horizon_reason','Horizon reason'],"
+            "['value','— Value'],"
             "['quality','— Quality'],['momentum','— Momentum'],['dividend_score','— Dividend'],"
             "['liquidity','— Liquidity'],['pe_ratio','P/E'],['price_to_book','P/B'],['roe','ROE %'],"
             "['dividend_yield','Dividend Yield %'],['dps','Dividend/Share (KES)'],"
@@ -2765,6 +2787,25 @@ tr:hover { background: #f8fafc; }
         def signal_td(s):
             return f'<td><span class="badge {s["signal_class"]}">{s["signal_label"]}</span></td>'
 
+        _HORIZON_CLASS = {'SHORT-TERM': 'horizon-short', 'LONG-TERM': 'horizon-long',
+                          'MIXED': 'horizon-mixed', 'UNCLEAR': 'horizon-unclear'}
+
+        def horizon_td(s):
+            h = (s.get('score_detail') or {}).get('horizon')
+            if not h:
+                return '<td>—</td>'
+            cls = _HORIZON_CLASS.get(h['label'], 'horizon-unclear')
+            label = h["label"].replace("-", " ").title()
+            # Same boxed, viewport-clamped data-tip popup as the score/symbol
+            # hovers (see _stock_tip) instead of the browser's native title=
+            # tooltip -- native tooltips aren't clamped and can run off-screen.
+            period_row = (f"<div class='tt-row'><span class='tt-k'>Suggested</span><span>{h['period']}</span></div>"
+                         if h.get('period') else '')
+            tip = (f"<div class='tt-h'><span>Horizon</span><span>{label}</span></div>"
+                  f"{period_row}"
+                  f"<div class='tt-note'>{h['reason']}</div>")
+            return f'<td data-tip="{tip}"><span class="badge {cls} hint">{label}</span></td>'
+
         def score_td(s):
             sc = s.get('score')
             if sc is None:
@@ -2825,15 +2866,29 @@ tr:hover { background: #f8fafc; }
             f'<option value="{label}">{label}</option>'
             for label in ('Strong Buy', 'Buy', 'Neutral', 'Sell', 'Strong Sell', 'N/A')
             if label in present_signals)
+
+        def _horizon_label(s):
+            h = (s.get('score_detail') or {}).get('horizon')
+            return h['label'] if h else None
+
+        # Horizon options in the same fixed priority order used everywhere
+        # else (short -> long -> mixed -> unclear), only labels actually present.
+        present_horizons = {_horizon_label(s) for s in stocks if _horizon_label(s)}
+        horizon_options = ''.join(
+            f'<option value="{label}">{label.replace("-", " ").title()}</option>'
+            for label in ('SHORT-TERM', 'LONG-TERM', 'MIXED', 'UNCLEAR')
+            if label in present_horizons)
         overview_search_bar = (
             '<div class="filter-bar"><input type="text" id="search" '
             'placeholder="🔍 Filter by symbol..." oninput="filterTable()">'
             f'<select id="sectorFilter" onchange="filterTable()"><option value="">All Sectors</option>{sector_options}</select>'
             f'<select id="signalFilter" onchange="filterTable()"><option value="">All Signals</option>{signal_options}</select>'
+            f'<select id="horizonFilter" onchange="filterTable()"><option value="">All Horizons</option>{horizon_options}</select>'
             '</div>')
         ov_rows = ''.join(
-            f'<tr data-sector="{s.get("sector") or ""}" data-signal="{s["signal_label"]}">'
-            f'{sym_td(s)}{signal_td(s)}<td>{price_cell(s)}</td>{change_td(s)}{score_td(s)}</tr>'
+            f'<tr data-sector="{s.get("sector") or ""}" data-signal="{s["signal_label"]}" '
+            f'data-horizon="{_horizon_label(s) or ""}">'
+            f'{sym_td(s)}{signal_td(s)}<td>{price_cell(s)}</td>{change_td(s)}{score_td(s)}{horizon_td(s)}</tr>'
             for s in stocks)
         # The charts live on their own Visuals tab now (Overview stays lean).
         visuals_body = self._build_visuals_body(stocks)
@@ -2859,6 +2914,9 @@ tr:hover { background: #f8fafc; }
             '<th class="sortable" data-sort-type="number" onclick="sortTable(this)">Change</th>'
             '<th class="sortable" data-sort-type="number" onclick="sortTable(this)" '
             'title="0-100 factor screen — hover a score for the breakdown">Score</th>'
+            '<th class="sortable" data-sort-type="text" onclick="sortTable(this)" '
+            'title="Is this call actionable days-to-weeks (momentum-driven) or months-to-years '
+            '(fundamentals-driven)? Hover for why. See IMPROVEMENTS.txt item 8">Horizon</th>'
             f'</tr></thead><tbody>{ov_rows}</tbody></table></div></div>')
 
         # ---- TECHNICALS page ----

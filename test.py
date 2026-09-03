@@ -304,6 +304,81 @@ class TestScoring(unittest.TestCase):
         self.assertTrue(any('MACD bullish' in a for a in alerts))
         self.assertTrue(any('52-week low' in a for a in alerts))
 
+    # ---- Horizon classification (IMPROVEMENTS.txt item 8) ----
+
+    def test_horizon_short_term_momentum_only(self):
+        """Strong momentum, no confirming fundamentals -> SHORT-TERM, period
+        tied to the specific technical trigger (MACD cross)."""
+        from scoring import _classify_horizon
+        scores = {'value': None, 'quality': None, 'momentum': 80, 'dividend': None, 'liquidity': 50}
+        analysis_result = {'signals': {'macd': 'bullish_cross'}, 'latest': {'rsi': 55}}
+        h = _classify_horizon(scores, analysis_result)
+        self.assertEqual(h['label'], 'SHORT-TERM')
+        self.assertEqual(h['period'], '1-4 weeks')
+        self.assertIn('momentum', h['drivers'])
+
+    def test_horizon_short_term_rsi_oversold_trigger(self):
+        from scoring import _classify_horizon
+        scores = {'value': None, 'quality': None, 'momentum': 70, 'dividend': None, 'liquidity': None}
+        analysis_result = {'signals': {'macd': 'bullish'}, 'latest': {'rsi': 25}}
+        h = _classify_horizon(scores, analysis_result)
+        self.assertEqual(h['label'], 'SHORT-TERM')
+        self.assertEqual(h['period'], 'days')
+
+    def test_horizon_long_term_fundamentals_agree(self):
+        """Value, quality and dividend all attractive and agreeing, no
+        strong momentum either way -> LONG-TERM, 6-12+ months."""
+        from scoring import _classify_horizon
+        scores = {'value': 80, 'quality': 75, 'momentum': 50, 'dividend': 70, 'liquidity': 40}
+        h = _classify_horizon(scores, {})
+        self.assertEqual(h['label'], 'LONG-TERM')
+        self.assertEqual(h['period'], '6-12+ months')
+        self.assertEqual(set(h['drivers']), {'value', 'quality', 'dividend'})
+
+    def test_horizon_long_term_with_tailwind(self):
+        """Fundamentals agree AND momentum is also strong -> LONG-TERM, but
+        the period notes the near-term tailwind."""
+        from scoring import _classify_horizon
+        scores = {'value': 80, 'quality': 75, 'momentum': 85, 'dividend': 70, 'liquidity': 40}
+        h = _classify_horizon(scores, {})
+        self.assertEqual(h['label'], 'LONG-TERM')
+        self.assertIn('tailwind', h['period'])
+        self.assertIn('momentum', h['drivers'])
+
+    def test_horizon_mixed_cheap_but_bearish(self):
+        """The spec's own example: fundamentals attractive but technically
+        bearish -> MIXED, not forced into either single label."""
+        from scoring import _classify_horizon
+        scores = {'value': 85, 'quality': 70, 'momentum': 20, 'dividend': 60, 'liquidity': 50}
+        h = _classify_horizon(scores, {})
+        self.assertEqual(h['label'], 'MIXED')
+        self.assertIsNone(h['period'])
+        self.assertIn('bearish', h['reason'])
+
+    def test_horizon_mixed_bullish_but_weak_fundamentals(self):
+        """Momentum strong but fundamentals actively weak -> MIXED (a
+        momentum trade, not a fundamentals-backed one)."""
+        from scoring import _classify_horizon
+        scores = {'value': 20, 'quality': 25, 'momentum': 80, 'dividend': 30, 'liquidity': 50}
+        h = _classify_horizon(scores, {})
+        self.assertEqual(h['label'], 'MIXED')
+
+    def test_horizon_unclear_no_data(self):
+        from scoring import _classify_horizon
+        scores = {'value': None, 'quality': None, 'momentum': None, 'dividend': None, 'liquidity': None}
+        h = _classify_horizon(scores, {})
+        self.assertEqual(h['label'], 'UNCLEAR')
+        self.assertIsNone(h['period'])
+
+    def test_horizon_wired_into_score_stock(self):
+        from scoring import score_stock
+        fund = {'pe_ratio': 8.0, 'roe': 25.0, 'dividend_yield': 8.0, 'sector': 'Banking'}
+        analysis_result = {'signals': {'overall': 'bullish', 'macd': 'bullish_cross'},
+                           'latest': {'rsi': 60}}
+        result = score_stock('TEST', analysis_result, fund)
+        self.assertIn('horizon', result)
+        self.assertIn(result['horizon']['label'], ('SHORT-TERM', 'LONG-TERM', 'MIXED', 'UNCLEAR'))
+
 
 class TestReportGenerator(unittest.TestCase):
     """Test report generation."""

@@ -21,6 +21,7 @@
 <div class="nav-bar">
     <a href="index.html" class="nav-item">🏠 Overview</a>
     <a href="visuals.html" class="nav-item">🗺️ Visuals</a>
+    <a href="compare.html" class="nav-item">⚖️ Compare</a>
     <a href="technicals.html" class="nav-item">📈 Technicals</a>
     <a href="fundamentals.html" class="nav-item">💰 Fundamentals</a>
     <a href="dividends.html" class="nav-item">💵 Dividends</a>
@@ -63,6 +64,20 @@
                 Liquidity {{ score.liquidity if score.liquidity is not none else '—' }}.
                 {% endif %}
                 A transparent mechanical screen of public metrics — not investment advice.
+            </div>
+        </div>
+        <div class="metric">
+            <div class="label">Horizon</div>
+            <div class="value" style="{% if score.horizon %}color:{{ {'SHORT-TERM': '#1e40af', 'LONG-TERM': '#166534', 'MIXED': '#92400e', 'UNCLEAR': '#64748b'}[score.horizon.label] }};{% endif %}">
+                {{ score.horizon.label if score.horizon else 'N/A' }}
+            </div>
+            <div style="font-size:0.72rem; color:var(--text-muted); margin-top:6px; line-height:1.4;">
+                {% if score.horizon %}
+                {% if score.horizon.period %}Suggested: {{ score.horizon.period }}.{% endif %}
+                {{ score.horizon.reason }}
+                {% else %}
+                Not enough momentum or fundamental data to classify a time horizon.
+                {% endif %}
             </div>
         </div>
         <div class="metric">
@@ -677,6 +692,7 @@
 <div class="nav-bar bottom-nav">
     <a href="index.html" class="nav-item">🏠 Overview</a>
     <a href="visuals.html" class="nav-item">🗺️ Visuals</a>
+    <a href="compare.html" class="nav-item">⚖️ Compare</a>
     <a href="technicals.html" class="nav-item">📈 Technicals</a>
     <a href="fundamentals.html" class="nav-item">💰 Fundamentals</a>
     <a href="dividends.html" class="nav-item">💵 Dividends</a>

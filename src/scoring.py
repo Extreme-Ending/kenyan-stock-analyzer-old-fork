@@ -256,6 +256,97 @@ def _score_liquidity(fund):
     return round(s), [f"traded KES {vt/1e6:.1f}M"]
 
 
+# Thresholds for horizon classification (see IMPROVEMENTS.txt item 8).
+_HORIZON_STRONG = 65
+_HORIZON_WEAK = 40
+
+
+def _short_term_trigger(analysis_result):
+    """
+    Name the specific technical trigger behind a SHORT-TERM call, with a
+    holding period tied to that trigger type rather than one fixed guess.
+    """
+    signals = (analysis_result or {}).get("signals", {})
+    latest = (analysis_result or {}).get("latest", {})
+    rsi = latest.get("rsi")
+    if signals.get("macd") == "bullish_cross":
+        return "1-4 weeks", "fresh MACD bullish crossover"
+    if signals.get("ma_crossover") == "golden_cross":
+        return "1-3 months", "golden cross (50/200-day MA)"
+    if rsi is not None and rsi < 30:
+        return "days", "RSI oversold bounce"
+    return "1-4 weeks", "bullish technical momentum"
+
+
+def _classify_horizon(scores, analysis_result):
+    """
+    Classify the time horizon a stock's call is actionable over, from which
+    sub-scores are actually driving it (see IMPROVEMENTS.txt item 8). A
+    momentum-only call (fresh MACD cross, RSI bounce) is a days-to-weeks
+    trade; a fundamentals-only call (cheap + high quality + sustainable
+    yield, all agreeing) is a months-to-years thesis. Showing both as the
+    same undifferentiated "Buy" is misleading.
+
+    Args:
+        scores: {value, quality, momentum, dividend, liquidity} sub-scores
+            (0-100 or None), as computed in score_stock().
+        analysis_result: dict from AnalysisEngine.analyze_multiple_stocks,
+            used only to name the specific technical trigger for the
+            suggested short-term holding period.
+
+    Returns:
+        dict: {label: 'SHORT-TERM'|'LONG-TERM'|'MIXED'|'UNCLEAR',
+               period: suggested holding-period string or None,
+               drivers: list of sub-score names behind the label,
+               reason: one-sentence plain-English explanation}
+    """
+    momentum = scores.get("momentum")
+    fundamentals = {k: scores[k] for k in ("value", "quality", "dividend") if scores.get(k) is not None}
+    fundamental_avg = sum(fundamentals.values()) / len(fundamentals) if fundamentals else None
+
+    # "Agree" = not just a high average, but no single fundamental factor
+    # dragging the thesis down (e.g. cheap but low-quality shouldn't count).
+    fundamentals_agree = (
+        fundamental_avg is not None and fundamental_avg >= _HORIZON_STRONG
+        and all(v >= 50 for v in fundamentals.values())
+    )
+    momentum_strong = momentum is not None and momentum >= _HORIZON_STRONG
+    momentum_weak = momentum is not None and momentum < _HORIZON_WEAK
+    fundamentals_weak = fundamental_avg is not None and fundamental_avg < _HORIZON_WEAK
+
+    if momentum is None and fundamental_avg is None:
+        return {"label": "UNCLEAR", "period": None, "drivers": [],
+                "reason": "Not enough momentum or fundamental data to classify."}
+
+    # Explicit conflicts -- surface these rather than forcing a single label.
+    if fundamentals_agree and momentum_weak:
+        return {"label": "MIXED", "period": None,
+                "drivers": list(fundamentals.keys()) + ["momentum"],
+                "reason": "Fundamentals look attractive but the technical trend is bearish -- conflicting signals."}
+    if momentum_strong and fundamentals_weak:
+        return {"label": "MIXED", "period": None,
+                "drivers": ["momentum"] + list(fundamentals.keys()),
+                "reason": "Technically bullish but fundamentals are weak -- a momentum trade, not a fundamentals-backed one."}
+
+    if momentum_strong and fundamentals_agree:
+        return {"label": "LONG-TERM", "period": "6-12+ months (with a near-term tailwind)",
+                "drivers": ["momentum"] + list(fundamentals.keys()),
+                "reason": "Fundamentals and momentum agree -- a long-term thesis with a favorable entry point."}
+
+    if momentum_strong:
+        period, trigger = _short_term_trigger(analysis_result)
+        return {"label": "SHORT-TERM", "period": period, "drivers": ["momentum"],
+                "reason": f"Momentum-driven ({trigger}); fundamentals aren't confirming a longer thesis."}
+
+    if fundamentals_agree:
+        return {"label": "LONG-TERM", "period": "6-12+ months",
+                "drivers": list(fundamentals.keys()),
+                "reason": "Value, quality and dividend sub-scores agree the stock is attractively priced and sound."}
+
+    return {"label": "MIXED", "period": None, "drivers": [],
+            "reason": "No single factor group dominates strongly enough to call a horizon."}
+
+
 def score_stock(symbol, analysis_result, fund, weights=None, sector_medians=None):
     """
     Produce a transparent factor score for one stock.
@@ -275,9 +366,13 @@ def score_stock(symbol, analysis_result, fund, weights=None, sector_medians=None
             has too few peers (MIN_SECTOR_PEERS) to be meaningful.
 
     Returns dict:
-        {overall, value, quality, momentum, dividend, liquidity, reasons}
+        {overall, value, quality, momentum, dividend, liquidity, reasons,
+         horizon}
     Sub-scores are 0-100 or None when data is missing. `overall` is the
     weighted blend of the available sub-scores (weights renormalised).
+    `horizon` classifies the time horizon this call is actionable over
+    (SHORT-TERM/LONG-TERM/MIXED/UNCLEAR) from which sub-scores are driving
+    it -- see _classify_horizon's docstring (IMPROVEMENTS.txt item 8).
     """
     weights = weights or DEFAULT_WEIGHTS
     fund = fund or {}
@@ -308,6 +403,7 @@ def score_stock(symbol, analysis_result, fund, weights=None, sector_medians=None
         "overall": overall,
         **scores,
         "reasons": reasons,
+        "horizon": _classify_horizon(scores, analysis_result),
     }
 
 
