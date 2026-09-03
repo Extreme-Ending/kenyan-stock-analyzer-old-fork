@@ -1,9 +1,11 @@
 #!/bin/bash
-# Stage real changes and commit -- never .env/.env.local, and never pure
-# file-permission noise (this sandbox has a habit of chmod'ing the whole
-# tree, which git tracks as a "modified" file with a 0/0 diff).
+# Interactive commit+push: prompts for a commit message, stages real changes
+# (never .env/.env.local, never pure file-permission noise -- this sandbox
+# has a habit of chmod'ing the whole tree, which git tracks as a "modified"
+# file with a 0/0 diff), shows what's staged, commits, then asks before
+# pushing.
 #
-# Usage: ./safe_commit.sh "commit message"
+# Usage: ./safe_commit.sh
 
 set -e
 cd "$(dirname "$0")"
@@ -14,16 +16,10 @@ cd "$(dirname "$0")"
 # override, not a persisted config change.
 git() { command git -c safe.directory='*' "$@"; }
 
-MSG="$1"
-if [ -z "$MSG" ]; then
-  echo "Usage: $0 \"commit message\"" >&2
-  exit 1
-fi
-
 # Never let .env slip in, even if something upstream force-adds it later.
 git reset -q -- .env .env.local 2>/dev/null || true
 
-echo "Staging real changes (skipping pure permission-mode noise)..."
+echo "Staging real changes (skipping .env and pure permission-mode noise)..."
 while IFS= read -r -d '' entry; do
   file="${entry:3}"
   # Untracked files always show a real diff when staged -- just add them.
@@ -41,12 +37,31 @@ done < <(git status --porcelain -z -- . ':!.env' ':!.env.local')
 
 echo
 echo "Staged for commit:"
-git status --short --untracked-files=no | grep -E '^[MARC]' || echo "  (nothing staged -- exiting)"
+staged="$(git status --short --untracked-files=no | grep -E '^[MARC]' || true)"
+if [ -z "$staged" ]; then
+  echo "  (nothing staged -- nothing to commit)"
+  exit 0
+fi
+echo "$staged"
 echo
 
-if git diff --cached --quiet; then
-  echo "Nothing to commit."
-  exit 0
+read -r -p "Commit message: " MSG
+if [ -z "$MSG" ]; then
+  echo "Empty message -- aborting (changes remain staged, nothing committed)." >&2
+  exit 1
 fi
 
 git commit -m "$MSG"
+echo
+
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+read -r -p "Push '$BRANCH' to origin now? [y/N] " CONFIRM
+if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
+  if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
+    git push
+  else
+    git push -u origin "$BRANCH"
+  fi
+else
+  echo "Committed locally only (not pushed)."
+fi
