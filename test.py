@@ -541,6 +541,135 @@ class TestBacktest(unittest.TestCase):
         self.assertIn('factor_correlation', summary['horizons'][5])
 
 
+class TestPriceValidation(unittest.TestCase):
+    """Test price validation: liquidity-scaled thresholds and the NSE-PDF
+    fallback reference source (IMPROVEMENTS.txt item 5). Never hits afx.
+    kwayisi.org or the real NSE PDF -- all network boundaries are mocked."""
+
+    @staticmethod
+    def _volume_history(avg_close=100.0, avg_volume=0, days=20):
+        """OHLCV frame with a fixed close and volume, for a known avg value
+        traded = avg_close * avg_volume. Ends at today so the freshness
+        check (unrelated to what these tests target) never flags it stale."""
+        dates = pd.date_range(end=pd.Timestamp.now().normalize(), periods=days, freq='B')
+        return pd.DataFrame({
+            'open': avg_close, 'high': avg_close, 'low': avg_close,
+            'close': avg_close, 'volume': avg_volume,
+        }, index=dates)
+
+    def test_avg_value_traded_computation(self):
+        from price_validation import PriceValidator
+        df = self._volume_history(avg_close=50.0, avg_volume=200_000)
+        result = PriceValidator._avg_value_traded(df)
+        self.assertAlmostEqual(result, 50.0 * 200_000, places=2)
+
+    def test_avg_value_traded_no_volume_column(self):
+        from price_validation import PriceValidator
+        df = pd.DataFrame({'close': [10, 11, 12]})
+        self.assertIsNone(PriceValidator._avg_value_traded(df))
+
+    def test_avg_value_traded_all_zero_volume(self):
+        from price_validation import PriceValidator
+        df = self._volume_history(avg_volume=0)
+        self.assertIsNone(PriceValidator._avg_value_traded(df))
+
+    def test_avg_value_traded_empty_or_none(self):
+        from price_validation import PriceValidator
+        self.assertIsNone(PriceValidator._avg_value_traded(None))
+        self.assertIsNone(PriceValidator._avg_value_traded(pd.DataFrame()))
+
+    def test_liquidity_multiplier_tiers(self):
+        from price_validation import PriceValidator
+        self.assertEqual(PriceValidator._liquidity_multiplier(50_000_000), 1.0)
+        self.assertEqual(PriceValidator._liquidity_multiplier(10_000_000), 1.0)
+        self.assertEqual(PriceValidator._liquidity_multiplier(5_000_000), 2.0)
+        self.assertEqual(PriceValidator._liquidity_multiplier(1_000_000), 2.0)
+        self.assertEqual(PriceValidator._liquidity_multiplier(500_000), 3.0)
+        self.assertEqual(PriceValidator._liquidity_multiplier(100_000), 3.0)
+        self.assertEqual(PriceValidator._liquidity_multiplier(50_000), 5.0)
+        self.assertEqual(PriceValidator._liquidity_multiplier(0), 5.0)
+        self.assertEqual(PriceValidator._liquidity_multiplier(None), 5.0)
+
+    def test_validate_same_pct_diff_liquid_flags_illiquid_does_not(self):
+        """The whole point of item 5: a flat threshold would flag both of
+        these identically (same 2% diff) -- liquidity-scaling must only
+        flag the liquid one."""
+        from price_validation import PriceValidator
+        with tempfile.TemporaryDirectory() as tmp:
+            pv = PriceValidator(cache_dir=tmp, disagree_threshold_pct=1.0)
+            pv._reference = {'AAA': {'price': 100.0, 'volume': 1000, 'change': None}}
+            pv._reference_source = 'afx.kwayisi.org'
+
+            liquid_history = self._volume_history(avg_close=100.0, avg_volume=500_000)  # 50M/day
+            illiquid_history = self._volume_history(avg_close=100.0, avg_volume=500)     # 50K/day
+
+            liquid_result = pv.validate('AAA', 102.0, liquid_history)   # 2% diff
+            illiquid_result = pv.validate('AAA', 102.0, illiquid_history)  # same 2% diff
+
+            self.assertEqual(liquid_result['status'], 'mismatch')
+            self.assertEqual(liquid_result['threshold_pct'], 1.0)
+            self.assertEqual(illiquid_result['status'], 'ok')
+            self.assertEqual(illiquid_result['threshold_pct'], 5.0)
+
+    def test_validate_unverified_when_no_reference(self):
+        from price_validation import PriceValidator
+        with tempfile.TemporaryDirectory() as tmp:
+            pv = PriceValidator(cache_dir=tmp)
+            pv._reference = {}
+            pv._reference_source = None
+            result = pv.validate('ZZZ', 50.0)
+            self.assertEqual(result['status'], 'unverified')
+            self.assertIsNone(result['reference_price'])
+
+    def test_fetch_reference_prices_falls_back_to_pdf_when_afx_fails(self):
+        from price_validation import PriceValidator, PDF_SOURCE
+        with tempfile.TemporaryDirectory() as tmp:
+            pv = PriceValidator(cache_dir=tmp)
+            with patch.object(pv, '_fetch_afx_reference', return_value={}), \
+                 patch.object(pv, '_fetch_pdf_reference',
+                              return_value={'AAA': {'price': 10.0, 'volume': 100, 'change': None}}) as mock_pdf:
+                ref = pv.fetch_reference_prices()
+            mock_pdf.assert_called_once()
+            self.assertEqual(ref, {'AAA': {'price': 10.0, 'volume': 100, 'change': None}})
+            self.assertEqual(pv._reference_source, PDF_SOURCE)
+
+    def test_fetch_reference_prices_skips_pdf_when_afx_succeeds(self):
+        """Never pay for the (slow, OCR-based) PDF fallback when the
+        primary source already answered."""
+        from price_validation import PriceValidator, AFX_SOURCE
+        with tempfile.TemporaryDirectory() as tmp:
+            pv = PriceValidator(cache_dir=tmp)
+            with patch.object(pv, '_fetch_afx_reference',
+                              return_value={'AAA': {'price': 10.0, 'volume': 100, 'change': None}}), \
+                 patch.object(pv, '_fetch_pdf_reference') as mock_pdf:
+                pv.fetch_reference_prices()
+            mock_pdf.assert_not_called()
+            self.assertEqual(pv._reference_source, AFX_SOURCE)
+
+    def test_fetch_reference_prices_both_sources_fail(self):
+        """Failure mode: neither source answers -- must degrade to {} /
+        'unverified' downstream, never raise."""
+        from price_validation import PriceValidator
+        with tempfile.TemporaryDirectory() as tmp:
+            pv = PriceValidator(cache_dir=tmp)
+            with patch.object(pv, '_fetch_afx_reference', return_value={}), \
+                 patch.object(pv, '_fetch_pdf_reference', return_value={}):
+                ref = pv.fetch_reference_prices()
+            self.assertEqual(ref, {})
+            self.assertIsNone(pv._reference_source)
+
+    def test_fetch_pdf_reference_reshapes_board(self):
+        """The PDF board's {open,high,low,close,volume} shape must map
+        close->price, volume->volume, and have no 'change' (not in the PDF)."""
+        from price_validation import PriceValidator
+        with tempfile.TemporaryDirectory() as tmp:
+            pv = PriceValidator(cache_dir=tmp)
+            fake_board = {'AAA': {'open': 9.5, 'high': 10.5, 'low': 9.0, 'close': 10.0, 'volume': 5000}}
+            with patch('data_acquisition.DataAcquisition.get_pdf_price_board', return_value=fake_board):
+                result = pv._fetch_pdf_reference()
+            self.assertEqual(result, {'AAA': {'price': 10.0, 'volume': 5000, 'change': None}})
+
+
 class TestReportGenerator(unittest.TestCase):
     """Test report generation."""
 
@@ -737,6 +866,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestScoring))
     suite.addTests(loader.loadTestsFromTestCase(TestHistoryTracker))
     suite.addTests(loader.loadTestsFromTestCase(TestBacktest))
+    suite.addTests(loader.loadTestsFromTestCase(TestPriceValidation))
     suite.addTests(loader.loadTestsFromTestCase(TestReportGenerator))
     suite.addTests(loader.loadTestsFromTestCase(TestEmailNotifier))
     suite.addTests(loader.loadTestsFromTestCase(TestTelegramNotifier))

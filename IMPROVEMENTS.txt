@@ -136,6 +136,32 @@ as a fallback — reuse it here). Scale disagree_threshold_pct by a
 liquidity proxy (e.g. value_traded or average daily volume) instead of
 using one flat threshold for all 57 stocks.
 
+STATUS (2026-09-03): Done. Fallback source: DataAcquisition gained
+get_pdf_price_board() (reuses the same per-day _pdf_cache as
+get_all_stocks_from_pdf()/the 'nse_pdf' data source -- costs nothing
+extra if that ran anyway, and only downloads+OCRs once even if both are
+called). price_validation.py's fetch_reference_prices() tries
+afx.kwayisi.org first, falls back to the PDF board only if afx fails,
+and tracks which source actually answered (self._reference_source,
+surfaced in validate()'s reference_source/note fields) -- degrades to
+"unverified" only if BOTH fail, not just afx. Liquidity-scaled
+threshold: new _avg_value_traded() (KES, last 20 traded bars) and
+_liquidity_multiplier() scale disagree_threshold_pct by tier (>=10M/day
+-> 1x unscaled, >=1M -> 2x, >=100K -> 3x, thinner/unknown -> 5x, fail-
+safe toward the most tolerant tier when volume data is missing) --
+validate() now returns threshold_pct and liquidity_multiplier alongside
+the existing fields for transparency. 14 new tests for a module that
+had zero coverage before (CLAUDE.md flagged this one by name) --
+including the core claim directly: the same 2% price disagreement
+flags "mismatch" on a liquid stock but "ok" on an illiquid one at the
+same base threshold. Verified against real afx data (SCOM/DTK get the
+1x threshold, thinner AMAC gets 3x) and the fallback chain forced end-
+to-end (afx failure correctly triggers the PDF path, which itself
+degrades to "unverified" cleanly since this sandbox has no tesseract
+binary installed -- a real environment limitation, not a code bug;
+the OCR dependency chain itself is unit-tested with mocks per CLAUDE.md's
+no-live-network rule for tests).
+
 
 6. FUNDAMENTALS HAVE NO CROSS-CHECK AT ALL
 --------------------------------------------------------------

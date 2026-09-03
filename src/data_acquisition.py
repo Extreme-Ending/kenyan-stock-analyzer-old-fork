@@ -159,6 +159,35 @@ class DataAcquisition:
             logger.warning(f"Could not get all stocks from PDF: {e}")
             return []
 
+    def get_pdf_price_board(self):
+        """
+        Return the full NSE daily price list PDF board — used by
+        price_validation.py as a second independent reference source when
+        afx.kwayisi.org is unreachable (see IMPROVEMENTS.txt item 5).
+
+        Reuses the same per-day PDF cache as get_all_stocks_from_pdf()/the
+        'nse_pdf' data source, so calling both in the same run only
+        downloads+OCRs the PDF once.
+
+        Returns:
+            dict: {symbol: {open, high, low, close, volume}}, or {} on
+            failure (fail-safe — OCR/network issues never raise here).
+        """
+        try:
+            today = datetime.now().date()
+            if self._pdf_cache is not None and self._pdf_cache_date == today:
+                return self._pdf_cache
+            pdf_url = self._get_nse_pdf_url()
+            if not pdf_url:
+                return {}
+            all_stocks = self._parse_nse_pdf(pdf_url) or {}
+            self._pdf_cache = all_stocks
+            self._pdf_cache_date = today
+            return all_stocks
+        except Exception as e:
+            logger.warning(f"Could not get NSE PDF price board: {e}")
+            return {}
+
     def get_all_stocks_from_tradingview(self):
         """
         Get ALL stock symbols from TradingView's Kenya market scanner.
