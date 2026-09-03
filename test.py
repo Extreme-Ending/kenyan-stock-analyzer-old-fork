@@ -203,6 +203,108 @@ class TestSectorAnalysis(unittest.TestCase):
         self.assertIn('bullish_ratio', banking)
 
 
+class TestScoring(unittest.TestCase):
+    """Test the transparent factor-scoring module, including sector-relative
+    valuation (IMPROVEMENTS.txt item 1). Pure computation -- no network."""
+
+    def test_score_stock_absolute_only(self):
+        """No sector_medians given -> scores on the absolute curve alone,
+        same as before sector-relative scoring existed."""
+        from scoring import score_stock
+        fund = {
+            'pe_ratio': 8.0, 'price_to_book': 1.0, 'roe': 25.0,
+            'net_margin': 20.0, 'debt_to_equity': 0.0, 'current_ratio': 2.0,
+            'dividend_yield': 8.0, 'dividend_payout_ratio': 50.0,
+            'value_traded': 1e9, 'sector': 'Banking',
+        }
+        result = score_stock('TEST', {}, fund)
+        self.assertIsNotNone(result['value'])
+        self.assertIsNotNone(result['overall'])
+        self.assertTrue(all('sector:' not in r for r in result['reasons']['value']))
+
+    def test_sector_relative_blend_rewards_cheap_vs_peers(self):
+        """A stock cheap relative to its sector's P/E median should score
+        higher on 'value' than the same stock scored on the absolute curve
+        alone -- the whole point of IMPROVEMENTS.txt item 1."""
+        from scoring import _score_value
+
+        fund = {'pe_ratio': 20.0, 'sector': 'Banking'}
+        absolute_score, _ = _score_value(fund)  # no sector_medians
+
+        # Sector median P/E of 60 -- this stock (P/E 20) is cheap vs peers.
+        sector_medians = {'Banking': {'pe_ratio': 60.0, 'count': 5}}
+        blended_score, reasons = _score_value(fund, sector_medians)
+
+        self.assertGreater(blended_score, absolute_score)
+        self.assertTrue(any('cheaper than sector' in r for r in reasons))
+
+    def test_sector_relative_blend_penalises_expensive_vs_peers(self):
+        """A stock pricier than its sector median should score lower than
+        the absolute curve alone."""
+        from scoring import _score_value
+
+        fund = {'pe_ratio': 20.0, 'sector': 'Banking'}
+        absolute_score, _ = _score_value(fund)
+
+        sector_medians = {'Banking': {'pe_ratio': 10.0, 'count': 5}}
+        blended_score, reasons = _score_value(fund, sector_medians)
+
+        self.assertLess(blended_score, absolute_score)
+        self.assertTrue(any('pricier than sector' in r for r in reasons))
+
+    def test_thin_sector_falls_back_to_absolute(self):
+        """Fewer than MIN_SECTOR_PEERS in the sector -> ignore the median
+        entirely rather than scoring against a noisy 1-2 stock 'average'."""
+        from scoring import _score_value, MIN_SECTOR_PEERS
+
+        fund = {'pe_ratio': 15.0, 'sector': 'Investment'}
+        absolute_score, _ = _score_value(fund)
+
+        thin_sector_medians = {'Investment': {'pe_ratio': 100.0, 'count': MIN_SECTOR_PEERS - 1}}
+        blended_score, reasons = _score_value(fund, thin_sector_medians)
+
+        self.assertEqual(blended_score, absolute_score)
+        self.assertTrue(all('sector:' not in r for r in reasons))
+
+    def test_missing_sector_median_metric_degrades_gracefully(self):
+        """A sector with enough peers but no P/E median on record (e.g. no
+        stock in it has a positive P/E) must not raise -- falls back to the
+        absolute score for that metric, per CLAUDE.md's fail-safe rule."""
+        from scoring import _score_value
+
+        fund = {'pe_ratio': 15.0, 'sector': 'Banking'}
+        sector_medians = {'Banking': {'pe_ratio': None, 'count': 5}}
+        score, reasons = _score_value(fund, sector_medians)
+
+        self.assertIsNotNone(score)
+        self.assertTrue(all('sector:' not in r for r in reasons))
+
+    def test_roe_and_dividend_yield_also_sector_blended(self):
+        """Item 1 covers P/E, P/B, dividend yield, and ROE -- check the
+        other two functions got the same treatment."""
+        from scoring import _score_quality, _score_dividend
+
+        fund_q = {'roe': 30.0, 'sector': 'Banking'}
+        sector_medians_q = {'Banking': {'roe': 15.0, 'count': 5}}
+        _, reasons_q = _score_quality(fund_q, sector_medians_q)
+        self.assertTrue(any('above sector' in r for r in reasons_q))
+
+        fund_d = {'dividend_yield': 2.0, 'sector': 'Banking'}
+        sector_medians_d = {'Banking': {'dividend_yield': 8.0, 'count': 5}}
+        _, reasons_d = _score_dividend(fund_d, sector_medians_d)
+        self.assertTrue(any('below sector' in r for r in reasons_d))
+
+    def test_generate_alerts(self):
+        from scoring import generate_alerts
+        analysis_result = {'latest': {'rsi': 25, 'close': 10.3},
+                           'signals': {'macd': 'bullish_cross'}}
+        fund = {'price_52w_low': 10.3}
+        alerts = generate_alerts('TEST', analysis_result, fund)
+        self.assertTrue(any('Oversold' in a for a in alerts))
+        self.assertTrue(any('MACD bullish' in a for a in alerts))
+        self.assertTrue(any('52-week low' in a for a in alerts))
+
+
 class TestReportGenerator(unittest.TestCase):
     """Test report generation."""
 
@@ -396,6 +498,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestUtils))
     suite.addTests(loader.loadTestsFromTestCase(TestAnalysisEngine))
     suite.addTests(loader.loadTestsFromTestCase(TestSectorAnalysis))
+    suite.addTests(loader.loadTestsFromTestCase(TestScoring))
     suite.addTests(loader.loadTestsFromTestCase(TestReportGenerator))
     suite.addTests(loader.loadTestsFromTestCase(TestEmailNotifier))
     suite.addTests(loader.loadTestsFromTestCase(TestTelegramNotifier))

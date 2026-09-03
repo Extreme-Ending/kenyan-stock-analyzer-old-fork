@@ -1069,6 +1069,7 @@ ul {{ margin: 4px 0; padding-left: 18px; }} li {{ margin: 2px 0; }}
     _NAV = [
         ('index.html', '🏠 Overview'),
         ('visuals.html', '🗺️ Visuals'),
+        ('compare.html', '⚖️ Compare'),
         ('technicals.html', '📈 Technicals'),
         ('fundamentals.html', '💰 Fundamentals'),
         ('dividends.html', '💵 Dividends'),
@@ -1188,6 +1189,7 @@ tr:hover { background: #f8fafc; }
 .chart-img { max-width: 100%; border-radius: 8px; margin-top: 12px; }
 .filter-bar { margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
 .filter-bar input { padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 0.9rem; width: 220px; }
+.filter-bar select { padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 0.9rem; background: #fff; }
 .footer { text-align: center; padding: 20px; color: #94a3b8; font-size: 0.8rem; }
 /* Plain-English explainer cards */
 .explain-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; margin-top: 6px; }
@@ -1308,9 +1310,19 @@ tr:hover { background: #f8fafc; }
             f'<a href="{fn}" class="nav-item{" active" if fn == active_file else ""}">{lbl}</a>'
             for fn, lbl in self._NAV
         )
+        # Text search always applies; the sector/signal selects are optional
+        # (only the Overview page has them) -- when absent, filtering is
+        # exactly the search-only behavior every other page already has.
         filter_js = ("function filterTable(){var i=document.getElementById('search');"
-                     "var q=i?i.value.toLowerCase():'';var rows=document.querySelectorAll('#mainTable tbody tr');"
-                     "rows.forEach(function(r){r.style.display=(!q||r.textContent.toLowerCase().indexOf(q)>-1)?'':'none';});}"
+                     "var q=i?i.value.toLowerCase():'';"
+                     "var sf=document.getElementById('sectorFilter');var sv=sf?sf.value:'';"
+                     "var gf=document.getElementById('signalFilter');var gv=gf?gf.value:'';"
+                     "var rows=document.querySelectorAll('#mainTable tbody tr');"
+                     "rows.forEach(function(r){"
+                     "var textOk=!q||r.textContent.toLowerCase().indexOf(q)>-1;"
+                     "var sectorOk=!sv||r.getAttribute('data-sector')===sv;"
+                     "var signalOk=!gv||r.getAttribute('data-signal')===gv;"
+                     "r.style.display=(textOk&&sectorOk&&signalOk)?'':'none';});}"
                      ) if with_filter else ""
         # Floating hover-tooltip (rich, never clipped by scroll containers) +
         # sticky-topbar shadow toggle. Reads HTML from each element's data-tip.
@@ -2305,8 +2317,15 @@ tr:hover { background: #f8fafc; }
             oc = "#22c55e" if overall >= 70 else "#f59e0b" if overall >= 45 else "#ef4444"
             p.append(f"<div class='tt-row'><span class='tt-k'>Overall score</span>"
                      f"<span style='color:{oc};font-weight:800'>{overall}/100</span></div>")
+            # Dividend/share (KES) -- the actual amount, not just the 0-100
+            # score, shown right on the label so it's visible without
+            # reading the "Why" reasons text. None = no data on record;
+            # a confirmed 0 (no dividend paid) is shown as KES 0.00, not N/A.
+            dps_val = s.get('dps')
+            dps_label = 'N/A' if dps_val is None else f"KES {dps_val:.2f}/share"
             for key, label in [("value", "Value"), ("quality", "Quality"),
-                               ("momentum", "Momentum"), ("dividend", "Dividend"),
+                               ("momentum", "Momentum"),
+                               ("dividend", f"Dividend ({dps_label})"),
                                ("liquidity", "Liquidity")]:
                 v = sd.get(key)
                 if v is None:
@@ -2608,6 +2627,106 @@ tr:hover { background: #f8fafc; }
             + self._build_market_snapshot(stocks)
             + self._build_most_active(stocks))
 
+    def _build_compare_body(self, stocks):
+        """
+        The Compare tab: pick 2-3 stocks and see their price, signal, score
+        breakdown (with reasons) and key fundamentals side by side.
+
+        Purely client-side, like the rest of this static dashboard — embeds
+        a JSON snapshot of `stocks` and renders the table with JS on
+        selection change, no server round trip needed.
+        """
+        compare_data = {}
+        for s in stocks:
+            sd = s.get('score_detail') or {}
+            reasons = sd.get('reasons') or {}
+            compare_data[s['symbol']] = {
+                'sector': s.get('sector') or None,
+                'price': s.get('price'),
+                'change': s.get('change'),
+                'signal_label': s.get('signal_label', 'N/A'),
+                'overall': sd.get('overall'),
+                'value': sd.get('value'),
+                'quality': sd.get('quality'),
+                'momentum': sd.get('momentum'),
+                'dividend_score': sd.get('dividend'),
+                'liquidity': sd.get('liquidity'),
+                'pe_ratio': s.get('pe_ratio'),
+                'price_to_book': s.get('price_to_book'),
+                'roe': s.get('roe'),
+                'dividend_yield': s.get('dividend_yield'),
+                'dps': s.get('dps'),
+                'market_cap': s.get('market_cap'),
+                'rsi': s.get('rsi'),
+                'trend': s.get('trend'),
+                'reasons_value': ' · '.join(reasons.get('value') or []) or None,
+                'reasons_quality': ' · '.join(reasons.get('quality') or []) or None,
+                'reasons_momentum': ' · '.join(reasons.get('momentum') or []) or None,
+                'reasons_dividend': ' · '.join(reasons.get('dividend') or []) or None,
+                'reasons_liquidity': ' · '.join(reasons.get('liquidity') or []) or None,
+            }
+        symbols = sorted(compare_data.keys())
+        options = ''.join(f'<option value="{sym}">{sym}</option>' for sym in symbols)
+        pickers = ''.join(
+            f'<select id="cmp{i}" class="cmp-picker" onchange="renderCompare()">'
+            f'<option value="">— choose a stock —</option>{options}</select>'
+            for i in range(3)
+        )
+        # </script> can never legally appear inside our own JSON (numbers,
+        # symbols, plain-text reasons) but escape defensively anyway before
+        # embedding untrusted-in-spirit scraped-derived text into a script tag.
+        data_json = json.dumps(compare_data).replace('</', '<\\/')
+        compare_js = (
+            "<script>"
+            f"var CMP_DATA={data_json};"
+            "var CMP_METRICS=[['sector','Sector'],['price','Price (KES)'],['change','Change %'],"
+            "['signal_label','TV Signal'],['overall','Score (0-100)'],['value','— Value'],"
+            "['quality','— Quality'],['momentum','— Momentum'],['dividend_score','— Dividend'],"
+            "['liquidity','— Liquidity'],['pe_ratio','P/E'],['price_to_book','P/B'],['roe','ROE %'],"
+            "['dividend_yield','Dividend Yield %'],['dps','Dividend/Share (KES)'],"
+            "['market_cap','Market Cap'],['rsi','RSI'],"
+            "['trend','Trend'],['reasons_value','Value factors'],['reasons_quality','Quality factors'],"
+            "['reasons_momentum','Momentum factors'],['reasons_dividend','Dividend factors'],"
+            "['reasons_liquidity','Liquidity factors']];"
+            "function fmtCmp(key,v){"
+            # dps: None/undefined means no data on record (TradingView nor the NSE
+            # calendar) -- 'N/A', distinct from a real 0 (confirmed no dividend).
+            "if(key==='dps'&&(v===null||v===undefined))return 'N/A';"
+            "if(v===null||v===undefined||v==='')return '—';"
+            "if(key==='dps')return (+v).toFixed(2);"
+            "if(key==='change')return (v>=0?'+':'')+(+v).toFixed(2)+'%';"
+            "if(key==='market_cap'){if(v>=1e9)return (v/1e9).toFixed(2)+'B';if(v>=1e6)return (v/1e6).toFixed(1)+'M';return v;}"
+            "if(['price','pe_ratio','price_to_book'].indexOf(key)>-1)return (+v).toFixed(2);"
+            "if(['roe','dividend_yield'].indexOf(key)>-1)return (+v).toFixed(1)+'%';"
+            "if(key==='rsi')return (+v).toFixed(1);"
+            "if(['overall','value','quality','momentum','dividend_score','liquidity'].indexOf(key)>-1)return v+'/100';"
+            "return v;}"
+            "function renderCompare(){"
+            "var syms=[0,1,2].map(function(i){return document.getElementById('cmp'+i).value;}).filter(Boolean);"
+            "var wrap=document.getElementById('compareWrap');"
+            "if(syms.length<2){wrap.innerHTML='<p class=\"page-intro\">Pick at least 2 stocks above to compare.</p>';return;}"
+            "var html='<div class=\"table-wrap\"><table><thead><tr><th>Metric</th>'"
+            "+syms.map(function(s){return '<th>'+s+'</th>';}).join('')+'</tr></thead><tbody>';"
+            "CMP_METRICS.forEach(function(m){"
+            "html+='<tr><td>'+m[1]+'</td>'+syms.map(function(s){var d=CMP_DATA[s]||{};"
+            "return '<td>'+fmtCmp(m[0],d[m[0]])+'</td>';}).join('')+'</tr>';});"
+            "html+='</tbody></table></div>';"
+            "wrap.innerHTML=html;}"
+            "document.addEventListener('DOMContentLoaded',function(){"
+            "var syms=Object.keys(CMP_DATA).sort();"
+            "['cmp0','cmp1','cmp2'].forEach(function(id,i){if(syms[i])document.getElementById(id).value=syms[i];});"
+            "renderCompare();});"
+            "</script>"
+        )
+        return (
+            "<p class='page-intro'>Pick 2-3 stocks to compare price, signal, the full factor-score "
+            "breakdown (with the reasons behind each factor), and key fundamentals side by side.</p>"
+            "<div class='section'><h2>⚖️ Compare Stocks</h2>"
+            f"<div class='filter-bar'>{pickers}</div>"
+            "<div id='compareWrap'></div></div>"
+            + compare_js
+        )
+
     def _build_dashboard_pages(self, stocks, gainers, losers, sectors, breadth,
                                sector_chart, bullish, bearish, neutral, total,
                                data_date=None, alerts=None, usd_kes=None):
@@ -2694,8 +2813,27 @@ tr:hover { background: #f8fafc; }
                       'placeholder="🔍 Filter by symbol..." oninput="filterTable()"></div>')
 
         # ---- OVERVIEW page: critical Buy/Sell + price + change + score ----
+        # Sector filter options: every distinct sector actually present (TradingView's
+        # industry taxonomy, e.g. "Finance", "Process Industries"), sorted alphabetically.
+        sector_options = ''.join(
+            f'<option value="{sec}">{sec}</option>'
+            for sec in sorted({s['sector'] for s in stocks if s.get('sector')}))
+        # Signal options in TradingView's own rank order (see
+        # FundamentalAnalysis.signal_from_tech_rating), only labels actually present.
+        present_signals = {s['signal_label'] for s in stocks}
+        signal_options = ''.join(
+            f'<option value="{label}">{label}</option>'
+            for label in ('Strong Buy', 'Buy', 'Neutral', 'Sell', 'Strong Sell', 'N/A')
+            if label in present_signals)
+        overview_search_bar = (
+            '<div class="filter-bar"><input type="text" id="search" '
+            'placeholder="🔍 Filter by symbol..." oninput="filterTable()">'
+            f'<select id="sectorFilter" onchange="filterTable()"><option value="">All Sectors</option>{sector_options}</select>'
+            f'<select id="signalFilter" onchange="filterTable()"><option value="">All Signals</option>{signal_options}</select>'
+            '</div>')
         ov_rows = ''.join(
-            f'<tr>{sym_td(s)}{signal_td(s)}<td>{price_cell(s)}</td>{change_td(s)}{score_td(s)}</tr>'
+            f'<tr data-sector="{s.get("sector") or ""}" data-signal="{s["signal_label"]}">'
+            f'{sym_td(s)}{signal_td(s)}<td>{price_cell(s)}</td>{change_td(s)}{score_td(s)}</tr>'
             for s in stocks)
         # The charts live on their own Visuals tab now (Overview stays lean).
         visuals_body = self._build_visuals_body(stocks)
@@ -2712,7 +2850,7 @@ tr:hover { background: #f8fafc; }
             '<p class="dq-note" style="margin-bottom:12px;">💡 Hover a stock symbol or its score for a preview — '
             'price, today-vs-yesterday, signal and the full factor breakdown behind the score. '
             '<strong>Click any column header to sort</strong> (click again to reverse).</p>'
-            + search_bar +
+            + overview_search_bar +
             '<div class="table-wrap"><table id="mainTable"><thead><tr>'
             '<th class="sortable" data-sort-type="text" onclick="sortTable(this)">Symbol</th>'
             '<th class="sortable" data-sort-type="signal" onclick="sortTable(this)" '
@@ -2761,6 +2899,11 @@ tr:hover { background: #f8fafc; }
             rg = s.get('revenue_growth')
             rg_str = f"{rg:+.1f}%" if rg is not None else '—'
             dy = f"{s['dividend_yield']:.1f}%" if s.get('dividend_yield') else '—'
+            # Actual per-share amount (KES), not the yield -- None means no
+            # data from either TradingView or the NSE dividend calendar; 0
+            # is a real "confirmed no dividend" reading, not missing data.
+            dps_val = s.get('dps')
+            dps_str = 'N/A' if dps_val is None else f"{dps_val:.2f}"
             fund_rows += (
                 f'<tr>{sym_td(s)}<td>{price_cell(s)}</td><td class="mcap-cell">{mcap}</td>'
                 f'<td class="{fcls("pe", s.get("pe_ratio"))}">{pe}</td>'
@@ -2771,7 +2914,8 @@ tr:hover { background: #f8fafc; }
                 f'<td class="{fcls("nm", s.get("net_margin"))}">{nm}</td>'
                 f'<td class="{fcls("de", s.get("debt_to_equity"))}">{de}</td>'
                 f'<td class="{fcls("rg", rg)}">{rg_str}</td>'
-                f'<td class="{fcls("yield", s.get("dividend_yield"))}">{dy}</td>{score_td(s)}</tr>')
+                f'<td class="{fcls("yield", s.get("dividend_yield"))}">{dy}</td>'
+                f'<td>{dps_str}</td>{score_td(s)}</tr>')
         fundamentals_body = (
             '<p class="page-intro">Valuation, quality, growth &amp; health metrics (from TradingView). '
             '<span class="fgood">Green = good</span>, <span class="fmid">amber = average</span>, '
@@ -2782,7 +2926,9 @@ tr:hover { background: #f8fafc; }
             '<th title="P/E adjusted for growth">PEG</th><th title="Price / Book value">P/B</th>'
             '<th title="Earnings per share">EPS</th><th title="Return on Equity">ROE</th>'
             '<th title="Net profit margin">Net Margin</th><th title="Debt / Equity">D/E</th>'
-            '<th title="Revenue growth vs last year">Rev Growth</th><th>Yield</th><th>Score</th>'
+            '<th title="Revenue growth vs last year">Rev Growth</th><th>Yield</th>'
+            '<th title="Actual declared dividend per share (KES), cross-checked against the NSE calendar. N/A = no data on record">Div/Share (KES)</th>'
+            '<th>Score</th>'
             f'</tr></thead><tbody>{fund_rows}</tbody></table></div></div>'
             + self._fundamentals_explainer())
 
@@ -3024,10 +3170,14 @@ tr:hover { background: #f8fafc; }
         # ---- GOVERNMENT BONDS page (CBK Treasury bonds + bills) ----
         bonds_body = self._build_bonds_body()
 
+        # ---- COMPARE page (pick 2-3 stocks, side by side) ----
+        compare_body = self._build_compare_body(stocks)
+
         # ---- Assemble & write all pages ----
         pages = {
             'index.html': self._page_shell('NSE Dashboard — Overview', 'index.html', subtitle, overview_body, with_filter=True),
             'visuals.html': self._page_shell('NSE — Visuals', 'visuals.html', subtitle, visuals_body),
+            'compare.html': self._page_shell('NSE — Compare Stocks', 'compare.html', subtitle, compare_body),
             'technicals.html': self._page_shell('NSE — Technicals', 'technicals.html', subtitle, technicals_body, with_filter=True),
             'fundamentals.html': self._page_shell('NSE — Fundamentals', 'fundamentals.html', subtitle, fundamentals_body, with_filter=True),
             'dividends.html': self._page_shell('NSE — Dividends', 'dividends.html', subtitle, dividends_body, with_filter=True),

@@ -186,10 +186,18 @@ building real user accounts unless there's demand for that.
   scraper and a flaky one need different fixes.
 - CI: run test.py on every push/PR via GitHub Actions, separate
   from the existing daily-summary.yml scheduled job.
-- Dockerize the pipeline — run.sh is macOS-only today (Homebrew
-  paths, `open`, a hardcoded python3.14 path); a Dockerfile
-  removes "works on my machine" issues and is also a prerequisite
-  for a clean ECS/Fargate deployment if we go that route later.
+- Dockerize the pipeline — run.sh still assumes a macOS desktop
+  (Homebrew's DYLD_LIBRARY_PATH); a Dockerfile removes "works on
+  my machine" issues and is also a prerequisite for a clean
+  ECS/Fargate deployment if we go that route later.
+  STATUS (2026-09-03): The two acute bugs in run.sh are fixed
+  (not the full Dockerization, still tracked above): SSL_CERT_FILE
+  was hardcoded to a python3.14 site-packages path, breaking every
+  HTTPS fetch with "[Errno 2] No such file or directory" on any
+  other Python version (hit on a real Python 3.12 venv) — now
+  derived from `certifi.where()` at runtime. `open` at the end
+  (macOS-only) now falls back to `xdg-open` or just prints the
+  path. DYLD_LIBRARY_PATH is now guarded to macOS only.
 - Move data/history/daily_snapshots.csv to SQLite (or Postgres if
   we're already provisioning a database for something else) —
   CSV read-modify-write gets slower and is fragile under
@@ -203,7 +211,22 @@ building real user accounts unless there's demand for that.
 - Filter the all-stocks table by sector/signal (sortable columns
   already shipped in a recent PR — filtering is the natural next
   step).
+  STATUS (2026-09-03): Done. Overview page's filter bar gained
+  sector and signal <select> dropdowns (report_generator.py's
+  _build_dashboard_pages) alongside the existing text search;
+  each row carries data-sector/data-signal attributes and
+  filterTable() in _page_shell now ANDs text+sector+signal —
+  other pages are unaffected since the selects are optional
+  (absent element = that filter is a no-op). Verified against a
+  real 57-stock dashboard build.
 - Side-by-side comparison view (pick 2-3 stocks).
+  STATUS (2026-09-03): Done. New Compare tab (compare.html,
+  _build_compare_body) — 2-3 symbol pickers render a metric
+  table (price, signal, full factor-score breakdown with
+  reasons, key fundamentals) client-side from an embedded JSON
+  snapshot, no server round trip. Defaults to the first 3
+  symbols on load. Verified by executing the actual rendered JS
+  in a Node harness (0/1/2/3-selection cases, default-select).
 - Historical price charts with a user's own trade entries
   overlaid — depends on portfolio tracking existing first (not
   yet built; would need its own data model + UI).

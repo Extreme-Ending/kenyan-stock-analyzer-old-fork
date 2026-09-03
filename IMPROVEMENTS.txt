@@ -22,6 +22,21 @@ Fix: pass sector_medians into score_stock() and score P/E, P/B, dividend
 yield, and ROE relative to the stock's own sector median instead of (or
 blended with) the fixed absolute breakpoints.
 
+STATUS (2026-09-03): Done. score_stock()/_score_value()/_score_quality()/
+_score_dividend() now take an optional sector_medians param (from
+market_context.compute_sector_medians()) and blend each metric 50/50 with
+a sector-relative score (50=in line with sector median, scaled linearly
+above/below); reasons record the verdict (e.g. "P/E 4.6 (sector: cheaper
+than sector)") per the transparency pattern. Sectors below MIN_SECTOR_PEERS
+(3) fall back to the absolute curve alone -- fail-safe against noisy
+1-2 stock buckets. Wired into both main.py and send_summary.py. Verified
+against real fundamentals data: Finance (22 stocks), Process Industries
+(10), and other well-populated sectors get real sector-relative scores;
+thin single-stock TradingView industry buckets (e.g. "Communications")
+correctly fall back to absolute-only. Covered by test.py's TestScoring
+(7 tests: absolute-only baseline, reward/penalize vs sector, thin-sector
+fallback, missing-median fail-safe, ROE/dividend-yield blending, alerts).
+
 
 2. NO BACKTESTING / ACCURACY FEEDBACK LOOP
 --------------------------------------------------------------

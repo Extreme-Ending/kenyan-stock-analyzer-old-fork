@@ -25,27 +25,111 @@ DEFAULT_WEIGHTS = {
     "liquidity": 0.15,
 }
 
+# Below this many peers, a sector median is too noisy to score against
+# (e.g. a 1-2 stock "sector" bucket) -- fall back to the absolute score alone.
+MIN_SECTOR_PEERS = 3
+
 
 def _clamp(x, lo=0.0, hi=100.0):
     return max(lo, min(hi, x))
 
 
-def _score_value(fund):
-    """Lower P/E, P/B and PEG score higher. Returns (score, reasons)."""
+def _sector_median(fund, sector_medians, key):
+    """
+    Look up this stock's sector median for `key`.
+
+    Args:
+        fund: This stock's fundamentals dict (used only for its 'sector').
+        sector_medians: {sector: {metric: median, 'count': n}} from
+            market_context.compute_sector_medians(), or None/empty.
+        key: Metric name, e.g. 'pe_ratio'.
+
+    Returns:
+        The median, or None if unavailable or the sector has fewer than
+        MIN_SECTOR_PEERS stocks with data for this metric.
+    """
+    if not sector_medians:
+        return None
+    bucket = sector_medians.get(fund.get("sector") or "Unknown")
+    if not bucket or bucket.get("count", 0) < MIN_SECTOR_PEERS:
+        return None
+    return bucket.get(key)
+
+
+def _relative_verdict(ratio, lower_is_better):
+    """Plain-English verdict for a value/median ratio (mirrors
+    market_context.valuation_vs_sector's thresholds, for consistent language
+    with the fundamentals page)."""
+    if lower_is_better:
+        if ratio < 0.8:
+            return "cheaper than sector"
+        if ratio > 1.25:
+            return "pricier than sector"
+    else:
+        if ratio > 1.25:
+            return "above sector"
+        if ratio < 0.8:
+            return "below sector"
+    return "in line with sector"
+
+
+def _blend_with_sector(absolute_score, value, median, lower_is_better):
+    """
+    Blend an absolute sub-score 50/50 with a sector-relative score (50 = in
+    line with the sector median, scaled linearly above/below).
+
+    Fail-safe: if `median` is unavailable (thin sector, or sector_medians not
+    passed to score_stock), returns the absolute score unchanged -- a missing
+    sector comparison never blocks or skews scoring, it just isn't added.
+
+    Returns:
+        (score, extra_reason_string_or_None)
+    """
+    if absolute_score is None or value is None or not median or median <= 0:
+        return absolute_score, None
+    try:
+        value = float(value)
+    except (ValueError, TypeError):
+        return absolute_score, None
+    ratio = value / median
+    delta = (ratio - 1) * 50
+    relative_score = _clamp(50 - delta if lower_is_better else 50 + delta)
+    blended = (absolute_score + relative_score) / 2
+    return blended, f"sector: {_relative_verdict(ratio, lower_is_better)}"
+
+
+def _score_value(fund, sector_medians=None):
+    """
+    Lower P/E and P/B score higher, blended with how the stock's P/E and P/B
+    compare to its own sector's median (when enough sector peers exist --
+    see MIN_SECTOR_PEERS) so a naturally-low-P/E sector (e.g. banking) isn't
+    scored on the same absolute curve as a naturally-higher-P/E one.
+
+    Args:
+        fund: This stock's fundamentals dict.
+        sector_medians: {sector: {metric: median, 'count': n}} from
+            market_context.compute_sector_medians(), or None to score on the
+            absolute curve alone.
+
+    Returns:
+        (score, reasons)
+    """
     parts, reasons = [], []
     pe = fund.get("pe_ratio")
     if pe and pe > 0:
         s = _clamp(100 - (pe - 8) * 4)  # pe 8 -> 100, pe 33 -> 0
+        s, extra = _blend_with_sector(s, pe, _sector_median(fund, sector_medians, "pe_ratio"), True)
         parts.append(s)
-        reasons.append(f"P/E {pe:.1f}")
+        reasons.append(f"P/E {pe:.1f}" + (f" ({extra})" if extra else ""))
     pb = fund.get("price_to_book")
     if pb and pb > 0:
         s = _clamp(100 - (pb - 1) * 30)  # pb 1 -> 100, pb ~4.3 -> 0
+        s, extra = _blend_with_sector(s, pb, _sector_median(fund, sector_medians, "price_to_book"), True)
         parts.append(s)
-        reasons.append(f"P/B {pb:.2f}")
+        reasons.append(f"P/B {pb:.2f}" + (f" ({extra})" if extra else ""))
     peg = fund.get("peg_ratio")
     if peg and peg > 0:
-        s = _clamp(100 - (peg - 0.5) * 50)  # peg 0.5 -> 100, peg 2.5 -> 0
+        s = _clamp(100 - (peg - 0.5) * 50)  # peg 0.5 -> 100, peg 2.5 -> 0 (no sector PEG median available)
         parts.append(s)
         reasons.append(f"PEG {peg:.2f}")
     if not parts:
@@ -53,13 +137,27 @@ def _score_value(fund):
     return round(sum(parts) / len(parts)), reasons
 
 
-def _score_quality(fund):
-    """Higher ROE/margins, lower leverage score higher."""
+def _score_quality(fund, sector_medians=None):
+    """
+    Higher ROE/margins, lower leverage score higher. ROE is blended with how
+    it compares to the stock's sector median (see _score_value's docstring
+    for why -- same sector-relative rationale applies to ROE).
+
+    Args:
+        fund: This stock's fundamentals dict.
+        sector_medians: {sector: {metric: median, 'count': n}}, or None to
+            score ROE on the absolute curve alone.
+
+    Returns:
+        (score, reasons)
+    """
     parts, reasons = [], []
     roe = fund.get("roe")
     if roe is not None:
-        parts.append(_clamp(roe * 4))  # roe 25% -> 100
-        reasons.append(f"ROE {roe:.1f}%")
+        s = _clamp(roe * 4)  # roe 25% -> 100
+        s, extra = _blend_with_sector(s, roe, _sector_median(fund, sector_medians, "roe"), False)
+        parts.append(s)
+        reasons.append(f"ROE {roe:.1f}%" + (f" ({extra})" if extra else ""))
     nm = fund.get("net_margin")
     if nm is not None:
         parts.append(_clamp(nm * 3.3))  # ~30% -> 100
@@ -112,13 +210,26 @@ def _score_momentum(analysis_result, fund):
     return round(sum(parts) / len(parts)), reasons
 
 
-def _score_dividend(fund):
-    """Reward yield, but only if the payout looks sustainable."""
+def _score_dividend(fund, sector_medians=None):
+    """
+    Reward yield (blended with how it compares to the stock's sector median,
+    see _score_value's docstring), but only if the payout looks sustainable.
+
+    Args:
+        fund: This stock's fundamentals dict.
+        sector_medians: {sector: {metric: median, 'count': n}}, or None to
+            score yield on the absolute curve alone.
+
+    Returns:
+        (score, reasons)
+    """
     parts, reasons = [], []
     dy = fund.get("dividend_yield")
     if dy is not None:
-        parts.append(_clamp(dy * 12.5))  # 8% -> 100
-        reasons.append(f"yield {dy:.1f}%")
+        s = _clamp(dy * 12.5)  # 8% -> 100
+        s, extra = _blend_with_sector(s, dy, _sector_median(fund, sector_medians, "dividend_yield"), False)
+        parts.append(s)
+        reasons.append(f"yield {dy:.1f}%" + (f" ({extra})" if extra else ""))
     payout = fund.get("dividend_payout_ratio")
     if payout is not None and payout > 0:
         # 40-70% is healthy; >100% is unsustainable
@@ -145,9 +256,23 @@ def _score_liquidity(fund):
     return round(s), [f"traded KES {vt/1e6:.1f}M"]
 
 
-def score_stock(symbol, analysis_result, fund, weights=None):
+def score_stock(symbol, analysis_result, fund, weights=None, sector_medians=None):
     """
     Produce a transparent factor score for one stock.
+
+    Args:
+        symbol: Stock ticker.
+        analysis_result: dict from AnalysisEngine.analyze_multiple_stocks.
+        fund: This stock's fundamentals dict.
+        weights: Optional override for DEFAULT_WEIGHTS.
+        sector_medians: Optional {sector: {metric: median, 'count': n}} from
+            market_context.compute_sector_medians(). When given, P/E, P/B,
+            dividend yield, and ROE are each blended 50/50 with how the
+            stock compares to its own sector's median (see
+            _score_value/_score_quality/_score_dividend), instead of being
+            scored on one fixed absolute curve regardless of sector. Falls
+            back to the absolute curve alone when omitted or when a sector
+            has too few peers (MIN_SECTOR_PEERS) to be meaningful.
 
     Returns dict:
         {overall, value, quality, momentum, dividend, liquidity, reasons}
@@ -158,10 +283,10 @@ def score_stock(symbol, analysis_result, fund, weights=None):
     fund = fund or {}
 
     subs = {
-        "value": _score_value(fund),
-        "quality": _score_quality(fund),
+        "value": _score_value(fund, sector_medians),
+        "quality": _score_quality(fund, sector_medians),
         "momentum": _score_momentum(analysis_result, fund),
-        "dividend": _score_dividend(fund),
+        "dividend": _score_dividend(fund, sector_medians),
         "liquidity": _score_liquidity(fund),
     }
 
