@@ -37,6 +37,7 @@ import numpy as np
 import pandas as pd
 from jinja2 import Environment, FileSystemLoader
 from fundamental_analysis import FundamentalAnalysis
+from utils import now_eat
 
 logger = logging.getLogger(__name__)
 
@@ -784,7 +785,7 @@ class ReportGenerator:
         validations = validations or {}
         scores = scores or {}
         alerts = alerts or {}
-        now = datetime.now().strftime('%Y-%m-%d %H:%M EAT')
+        now = now_eat().strftime('%Y-%m-%d %H:%M EAT')
 
         total = len([r for r in analysis_results.values() if r])
         bullish = sum(1 for r in analysis_results.values()
@@ -2866,7 +2867,7 @@ tr:hover { background: #f8fafc; }
         Every piece of data from the old single page is preserved, just moved
         to a related page. Writes all pages and returns the index.html path.
         """
-        now = datetime.now().strftime('%Y-%m-%d %H:%M EAT')
+        now = now_eat().strftime('%Y-%m-%d %H:%M EAT')
         data_date_str = data_date or datetime.now().strftime('%Y-%m-%d')
         fx = f" · 💵 USD/KES {usd_kes['rate']:.2f}" if (usd_kes and usd_kes.get('rate')) else ""
         subtitle = (f"{now} · {total} stocks · 📅 {data_date_str} · "

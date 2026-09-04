@@ -22,6 +22,28 @@ logger = logging.getLogger(__name__)
 DEFAULT_HTTP_TIMEOUT: Tuple[int, int] = (3, 6)
 
 
+def now_eat() -> datetime:
+    """
+    Current time in Kenya (Africa/Nairobi, UTC+3, no DST).
+
+    Scheduled jobs (e.g. GitHub Actions runners) run in UTC, so a naive
+    `datetime.now()` displayed with an "EAT" label is silently wrong by
+    3 hours there. Centralises the tz-aware lookup so every notifier/report
+    timestamp labelled EAT is actually EAT.
+
+    Returns:
+        datetime: timezone-aware current time in Africa/Nairobi, or naive
+            local time as a last-resort fallback if the platform has no
+            tzdata available (rare on minimal Python builds).
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Africa/Nairobi"))
+    except Exception:
+        logger.warning("Africa/Nairobi tzdata unavailable — falling back to naive local time")
+        return datetime.now()
+
+
 def http_get(url, *, headers=None, timeout=DEFAULT_HTTP_TIMEOUT, retries=1,
              backoff=0.5, allow_redirects=True):
     """

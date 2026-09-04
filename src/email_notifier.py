@@ -11,8 +11,9 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
-from datetime import datetime
+from email.utils import format_datetime
 from logger import get_logger
+from utils import now_eat
 
 logger = get_logger(__name__)
 
@@ -63,7 +64,7 @@ class EmailNotifier:
         msg['Subject'] = subject
         msg['From'] = self.user
         msg['To'] = ', '.join(self.recipients)
-        msg['Date'] = datetime.now().strftime('%a, %d %b %Y %H:%M:%S +0300')
+        msg['Date'] = format_datetime(now_eat())
 
         # Attach HTML body
         html_part = MIMEText(html_body, 'html', 'utf-8')
@@ -134,7 +135,7 @@ class EmailNotifier:
         Returns:
             HTML string suitable for email clients.
         """
-        now = datetime.now().strftime('%Y-%m-%d %H:%M EAT')
+        now = now_eat().strftime('%Y-%m-%d %H:%M EAT')
         total = len(analysis_results)
 
         # Count signals

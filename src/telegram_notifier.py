@@ -7,7 +7,7 @@ verification needed (see ROADMAP.txt section 1b for setup via @BotFather).
 """
 
 import requests
-from utils import DEFAULT_HTTP_TIMEOUT
+from utils import DEFAULT_HTTP_TIMEOUT, now_eat
 from logger import get_logger
 
 logger = get_logger(__name__)
@@ -145,9 +145,7 @@ class TelegramNotifier:
         Returns:
             str: Telegram-HTML formatted message text.
         """
-        from datetime import datetime
-
-        now = datetime.now().strftime('%Y-%m-%d %H:%M EAT')
+        now = now_eat().strftime('%Y-%m-%d %H:%M EAT')
         total = len(analysis_results)
 
         bullish = sum(

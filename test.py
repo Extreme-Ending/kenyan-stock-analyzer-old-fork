@@ -88,6 +88,15 @@ class TestUtils(unittest.TestCase):
         self.assertEqual(result, "success")
         self.assertEqual(call_count[0], 3)
 
+    def test_now_eat_is_utc_plus_3(self):
+        """Regression: notifier/report timestamps were labelled 'EAT' but
+        used naive datetime.now(), which is UTC on GitHub Actions runners
+        -- 3 hours off from actual Kenyan time there."""
+        from utils import now_eat
+        result = now_eat()
+        self.assertIsNotNone(result.tzinfo)
+        self.assertEqual(result.utcoffset().total_seconds(), 3 * 3600)
+
 
 class TestOutlierFiltering(unittest.TestCase):
     """Test OHLCV outlier/bad-tick filtering (IMPROVEMENTS.txt item 7).
