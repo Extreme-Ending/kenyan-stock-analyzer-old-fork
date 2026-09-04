@@ -12,55 +12,79 @@ Each item: current state -> problem/opportunity -> proposed approach.
 0. TARGET DEPLOYMENT ARCHITECTURE (constraint for everything below)
 ================================================================
 
-Decided direction: S3 (static hosting for the dashboard) + Lambda
-(compute) + SNS (email/notification fan-out). Every section below
-should be read with this shape in mind, not a generic
-"some server somewhere" assumption. Terraform for this is still
-parked (per earlier conversation) but the target shape now informs
-how we build toward it.
+Decided direction (revised 2026-09-04, see STATUS below): dashboard
+hosting is GitHub Pages, not S3 -- an AWS/S3 attempt was built, tested,
+and deliberately torn down the same day (see 0a's STATUS for why and
+what was learned). Lambda (compute) and SNS (notification fan-out)
+remain open ideas, not decided -- GitHub Actions has proven sufficient
+for both the notification pipeline (daily-summary.yml, live) and the
+full dashboard build (~4 min locally, well inside Actions' free-tier
+limits), so there's no evidence yet that either is actually needed.
+Terraform is parked; nothing here currently depends on it.
 
-0a. S3 — dashboard hosting
+0a. Dashboard hosting
 --------------------------------------------------------------
 Confirmed in code: report_generator.py embeds every chart as a
 base64 PNG directly inside the HTML (`data:image/png;base64,...`,
 see _fig_to_base64 and the chart-embedding call sites). Every
 generated report is a single self-contained HTML file — no
-separate image assets to keep in sync. That means hosting on S3
-is just `aws s3 sync reports/ s3://<bucket>/` (or a Terraform
-`aws_s3_object`/`aws_s3_bucket` resource driven the same way) —
-no CDN-asset-pipeline complexity needed. Static website hosting
-or S3 + CloudFront both work; CloudFront adds HTTPS + caching if
-we want a nicer URL than the raw S3 website endpoint.
-Excel export (.xlsx) can sync alongside if we want it downloadable
-from the same bucket; the earnings.ics file too.
+separate image assets to keep in sync. That's what makes any
+static host (S3, GitHub Pages, ...) trivial: no CDN-asset-pipeline
+complexity needed, just sync/publish the reports/ directory as-is.
 
-STATUS (2026-09-04): Attempted, then fully torn down at the project
-owner's request ("I want all this to be private") before it ever went
-live -- not currently deployed anywhere. Built and provisioned from
-scratch (plain S3 static website, no CloudFront/custom domain, per the
-"simple and cheap" preference), then deleted the same session: the S3
-bucket, its public-read policy, the GitHub Actions OIDC identity
-provider, the IAM role, and the GitHub repo variables. The
-.github/workflows/deploy.yml file was removed too. Nothing was ever
-publicly exposed -- the bucket was confirmed empty (the first deploy
-run failed before reaching the S3 sync step) before teardown.
-Engineering notes worth keeping for whenever this gets revisited:
+STATUS (2026-09-04): Live on GitHub Pages --
+https://extreme-ending.github.io/kenyan-stock-analyzer/ . New
+.github/workflows/deploy-pages.yml rebuilds the full dashboard
+(`python main.py --force-refresh --no-email`, lean scope -- no
+--detailed/--export-excel, keeps runs fast and report_format defaults
+to html so no WeasyPrint system libs needed) and publishes it via
+GitHub's own actions/upload-pages-artifact + actions/deploy-pages, on
+the same three daily checkpoints as daily-summary.yml (open/mid/close,
+so the live dashboard refreshes right when notifications go out) plus
+every push to main. No AWS, no IAM/OIDC to maintain -- GitHub manages
+the Pages deployment's auth internally. Verified live (HTTP 200,
+correct page title) after the first real push-triggered deploy.
+
+An S3 approach was tried first and worked technically, but was fully
+torn down the same session at the project owner's explicit request
+("I want all this to be private") once it became clear that even
+non-secret AWS identifiers (the account ID, via an IAM role ARN printed
+in a public Actions log -- GitHub only auto-redacts `secrets.*`
+values, never `vars.*`, and this repo's Actions logs are public since
+the repo itself is) were leaking into public GitHub Actions logs on a
+public fork. Confirmed nothing was left exposed afterward: the S3
+bucket, its public-read policy, the GitHub OIDC identity provider, the
+IAM role, and the GitHub repo variables were all deleted; the leaking
+Actions run itself was deleted (not just its workflow file); a full
+sweep of git history, remaining secrets/variables, and all workflow
+runs turned up zero remaining AWS-identifying traces. GitHub Pages was
+chosen over rebuilding the S3 route because it fully sidesteps the
+problem class (no AWS account involved at all, so nothing AWS-specific
+can leak) and matches the "simple and cheap" preference better --
+zero IAM/OIDC surface to get wrong, free, and it's what's live today.
+Engineering notes kept in case S3 (or any AWS-OIDC integration) is
+ever revisited for something else:
   - GitHub's OIDC token `sub` claim was NOT the classic
     `repo:OWNER/REPO:ref:refs/heads/BRANCH` format -- it came through as
     `repo:OWNER@<org_id>/REPO@<repo_id>:ref:refs/heads/BRANCH` (an
     "immutable ID" format, confirmed via CloudTrail after an
-    AssumeRoleWithWebIdentity AccessDenied). The IAM role trust policy
+    AssumeRoleWithWebIdentity AccessDenied). An IAM role trust policy
     needs a StringLike condition covering both
     `repo:Extreme-Ending/kenyan-stock-analyzer:ref:refs/heads/main` and
     `repo:Extreme-Ending@*/kenyan-stock-analyzer@*:ref:refs/heads/main`
     (or the exact immutable IDs) to actually match.
-  - Same known limitation as before, still applies whenever this is
-    rebuilt: data/history/daily_snapshots.csv (IMPROVEMENTS.txt item 2's
-    backtest input) won't persist between GitHub Actions runs (ephemeral
-    runner, data/ is gitignored) -- the Track Record page will always
-    show "insufficient_history" there until history gets a persistent
-    store (ties into section 2's CSV->SQLite item; SQLite alone doesn't
-    fix this unless the DB file itself is synced to/from S3 too).
+  - Never put an AWS identifier (ARN, account ID, bucket name) in a
+    workflow `vars.*` if the repo is public and the value should stay
+    private -- only `secrets.*` gets redacted in Actions logs, and
+    those logs are public on a public repo regardless of collaborator
+    permissions.
+Known limitation, still applies to the live GitHub Pages setup too:
+data/history/daily_snapshots.csv (IMPROVEMENTS.txt item 2's backtest
+input) doesn't persist between GitHub Actions runs (ephemeral runner,
+data/ is gitignored) -- the deployed Track Record page will always
+show "insufficient_history" until history gets a persistent store
+(ties into section 2's CSV->SQLite item; SQLite alone doesn't fix this
+unless the DB file itself is synced somewhere across runs too).
 0b. Lambda — compute constraints to design around
 --------------------------------------------------------------
 Two real constraints, both worth checking before committing code
@@ -389,26 +413,40 @@ consumer actually needs it.
 
 PRIORITY SUGGESTION
 ================================================================
-1. Telegram push notification (1b-i) — cheapest, reuses existing
-   GitHub Actions job, immediate value, no AWS needed yet.
-2. Observability on data-source health (5) — cheap, prevents
-   silent breakage of things we already built.
-3. CI running test.py on push/PR (2) — protects everything else
-   we build from here on.
-4. Dockerize the pipeline (2) — do this before touching Lambda;
-   a working container is the shared prerequisite for both the
-   container-image Lambda (0b) and any ECS Fargate fallback.
-5. S3 + Lambda + SNS for the daily-summary path (0, replaces the
-   current email-only GitHub Actions job) — build the lean
-   send_summary.py flow on Lambda first (0b), sync its output to
-   S3 (0a), publish through SNS (0c). This is also where the
-   Terraform work plugs in.
-6. WhatsApp push notification (1c) — more setup friction, do once
-   Telegram + SNS's shared-payload design is proven on Lambda.
-7. Dashboard filtering (3) — quick UX win, no new infra.
-8. CSV->SQLite for history (2) — do before scaling run frequency.
-9. Security scanning (6) — cheap, enable and forget (Dependabot).
-10. Expanded test coverage (4) — ongoing, do alongside any touched
-    module per CLAUDE.md's testing rule.
-11. Interactive bot + read API (1b-ii, 7) — only once the lean
-    Lambda path (step 5) is proven; needs S3 JSON + API Gateway.
+(Updated 2026-09-04 -- several of these are done; kept the original
+numbering's intent but marked status inline so this list stays a
+useful guide instead of going stale silently.)
+
+1. Telegram push notification (1b-i) — DONE, live-verified.
+2. Dashboard hosting (0a) — DONE, live on GitHub Pages (not S3 --
+   see 0a's STATUS for why). Refreshes 3x/day + on every push.
+3. CI running test.py on push/PR (2) — DONE, also caught and fixed
+   a real stale-docs bug (claimed Python 3.10+, actually 3.12+).
+4. Dashboard filtering (3) — DONE (sector/signal/horizon filters).
+5. Observability on data-source health (5) — not started. Cheap,
+   prevents silent breakage of things already built (CBK/T-bills/
+   bonds outages currently go unnoticed).
+6. Security scanning (6) — not started. Cheap, enable and forget
+   (Dependabot / pip-audit).
+7. CSV->SQLite for history (2) — not started. Also unblocks the
+   Track Record page actually accumulating data on GitHub Pages/
+   Actions (see 0a's known limitation -- ephemeral runners lose
+   data/ every run regardless of CSV vs SQLite unless the DB file
+   itself is persisted somewhere across runs).
+8. Expanded test coverage (4) — ongoing; dividend_calendar.py and
+   earnings_calendar.py still have zero coverage despite CLAUDE.md
+   flagging them by name.
+9. Dockerize the pipeline (2) — only the two acute run.sh bugs are
+   fixed, not full containerization. Lower priority now that both
+   the notification job and the dashboard build run fine on plain
+   GitHub Actions runners -- no longer a prerequisite for anything
+   currently planned (Lambda/ECS are undecided, see section 0).
+10. WhatsApp push notification (1c) — not started, real setup
+    friction (Meta Business verification or Twilio), do only once
+    there's demand for a channel beyond Telegram/email.
+11. Interactive bot + read API (1b-ii, 7) — not started. Optional;
+    only worth building once something actually needs fast
+    on-demand data instead of the scheduled summaries.
+12. Lambda/SNS for the notification pipeline (0b/0c) — not decided.
+    No evidence yet that GitHub Actions is insufficient for this
+    project's scale; revisit only if that changes.
