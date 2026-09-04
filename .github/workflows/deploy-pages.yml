@@ -1,0 +1,78 @@
+name: Deploy Dashboard
+
+# Rebuilds the full dashboard (python main.py, lean scope -- no --detailed/
+# --export-excel, keeps every run fast) and publishes it to GitHub Pages.
+# Triggered on the same three daily checkpoints as daily-summary.yml (see
+# that file for why these exact cron times) so the live dashboard reflects
+# fresh data right when notifications go out, plus on every push to main
+# so code changes show up immediately. Uses GitHub's own Pages deployment
+# action -- no AWS, no IAM/OIDC to hand-roll (see ROADMAP.txt section 0a
+# for why that route was tried and abandoned).
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Times in UTC; EAT = UTC+3, Kenya doesn't observe DST. Same three
+    # checkpoints as daily-summary.yml: open/mid/close.
+    - cron: '15 6 * * 1-5'
+    - cron: '0 9 * * 1-5'
+    - cron: '20 12 * * 1-5'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deployment at a time; a newer run should win, not queue
+# behind a stale one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Start clean (remove any stale reports/data)
+        run: rm -rf reports data logs && mkdir -p reports data logs
+
+      # report_format defaults to 'html' (src/config.py) so no WeasyPrint
+      # system libs needed. --no-email guarantees no notification side
+      # effect from this job -- that's daily-summary.yml's job, not this
+      # one's. No EMAIL_*/TELEGRAM_* secrets are passed here at all; this
+      # job only ever builds and publishes static HTML.
+      - name: Build dashboard
+        run: python main.py --force-refresh --no-email
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: reports
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
