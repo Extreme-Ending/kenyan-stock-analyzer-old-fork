@@ -31,6 +31,10 @@ logs/
 # Claude Code settings (may contain local paths/secrets)
 .claude/
 
+# safe_commit.sh's backup of a broken .git (sandbox artifact -- see the
+# script's heal_broken_git()); never a real project file, never commit it.
+.git.broken-*/
+
 # Environment variables (contains secrets)
 .env
 .env.local
