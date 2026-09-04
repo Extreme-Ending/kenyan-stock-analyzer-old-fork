@@ -14,6 +14,10 @@ logger = get_logger(__name__)
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
 
+# Live dashboard, appended to every outbound message so a recipient can
+# always jump to the full picture, not just the compact summary text.
+DASHBOARD_URL = "https://extreme-ending.github.io/kenyan-stock-analyzer/"
+
 # Telegram's sendDocument caption limit (characters).
 _CAPTION_LIMIT = 1024
 
@@ -66,27 +70,48 @@ class TelegramNotifier:
             logger.error("Telegram not configured — cannot send")
             return False
 
-        url = f"{TELEGRAM_API_BASE}/bot{self.bot_token}/sendMessage"
-        sent = 0
-        for chat_id in self.chat_ids:
-            payload = {
-                'chat_id': chat_id,
-                'text': text,
-                'parse_mode': parse_mode,
-                'disable_web_page_preview': True,
-            }
-            try:
-                response = requests.post(url, json=payload, timeout=DEFAULT_HTTP_TIMEOUT)
-                if response.status_code == 200 and response.json().get('ok'):
-                    sent += 1
-                else:
-                    logger.error(f"Telegram sendMessage to {chat_id} failed: "
-                                f"{response.status_code} {response.text}")
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Failed to send Telegram message to {chat_id}: {e}")
-
+        sent = sum(1 for chat_id in self.chat_ids
+                   if self.send_message_to(chat_id, text, parse_mode=parse_mode))
         logger.info(f"Telegram message sent to {sent}/{len(self.chat_ids)} chat(s)")
         return sent > 0
+
+    def send_message_to(self, chat_id, text, parse_mode='HTML'):
+        """
+        Send a text message to a single, arbitrary chat ID -- not just the
+        configured broadcast list. Used by send_message() for each
+        configured recipient, and directly by telegram_poller.py to reply
+        to whichever chat_id just messaged the bot (a new subscriber, or
+        the owner's /refresh confirmation).
+
+        Args:
+            chat_id: Telegram chat ID (any type accepted by the API).
+            text: Message body (see send_message's parse_mode note).
+            parse_mode: Telegram parse mode, default 'HTML'.
+
+        Returns:
+            bool: True if Telegram accepted the message, False on any
+            failure -- never raises to the caller.
+        """
+        if not self.bot_token:
+            logger.error("Telegram not configured — cannot send")
+            return False
+
+        url = f"{TELEGRAM_API_BASE}/bot{self.bot_token}/sendMessage"
+        payload = {
+            'chat_id': chat_id,
+            'text': text,
+            'parse_mode': parse_mode,
+            'disable_web_page_preview': True,
+        }
+        try:
+            response = requests.post(url, json=payload, timeout=DEFAULT_HTTP_TIMEOUT)
+            if response.status_code == 200 and response.json().get('ok'):
+                return True
+            logger.error(f"Telegram sendMessage to {chat_id} failed: "
+                        f"{response.status_code} {response.text}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to send Telegram message to {chat_id}: {e}")
+        return False
 
     def send_document(self, filepath, caption=None):
         """
@@ -105,26 +130,83 @@ class TelegramNotifier:
             logger.error("Telegram not configured — cannot send")
             return False
 
-        url = f"{TELEGRAM_API_BASE}/bot{self.bot_token}/sendDocument"
-        sent = 0
-        for chat_id in self.chat_ids:
-            data = {'chat_id': chat_id}
-            if caption:
-                data['caption'] = caption[:_CAPTION_LIMIT]
-            try:
-                with open(filepath, 'rb') as f:
-                    files = {'document': f}
-                    response = requests.post(url, data=data, files=files, timeout=DEFAULT_HTTP_TIMEOUT)
-                if response.status_code == 200 and response.json().get('ok'):
-                    sent += 1
-                else:
-                    logger.error(f"Telegram sendDocument to {chat_id} failed: "
-                                f"{response.status_code} {response.text}")
-            except (OSError, requests.exceptions.RequestException) as e:
-                logger.error(f"Failed to send Telegram document to {chat_id}: {e}")
-
+        sent = sum(1 for chat_id in self.chat_ids
+                   if self.send_document_to(chat_id, filepath, caption=caption))
         logger.info(f"Telegram document sent to {sent}/{len(self.chat_ids)} chat(s): {filepath}")
         return sent > 0
+
+    def send_document_to(self, chat_id, filepath, caption=None):
+        """
+        Send a local file to a single, arbitrary chat ID -- the
+        single-recipient counterpart to send_document(), same relationship
+        as send_message_to() has to send_message().
+
+        Args:
+            chat_id: Telegram chat ID.
+            filepath: Path to the local file to send.
+            caption: Optional caption text, truncated to Telegram's limit.
+
+        Returns:
+            bool: True if Telegram accepted the document, False on any
+            failure (missing file included) -- never raises.
+        """
+        if not self.bot_token:
+            logger.error("Telegram not configured — cannot send")
+            return False
+
+        url = f"{TELEGRAM_API_BASE}/bot{self.bot_token}/sendDocument"
+        data = {'chat_id': chat_id}
+        if caption:
+            data['caption'] = caption[:_CAPTION_LIMIT]
+        try:
+            with open(filepath, 'rb') as f:
+                files = {'document': f}
+                response = requests.post(url, data=data, files=files, timeout=DEFAULT_HTTP_TIMEOUT)
+            if response.status_code == 200 and response.json().get('ok'):
+                return True
+            logger.error(f"Telegram sendDocument to {chat_id} failed: "
+                        f"{response.status_code} {response.text}")
+        except (OSError, requests.exceptions.RequestException) as e:
+            logger.error(f"Failed to send Telegram document to {chat_id}: {e}")
+        return False
+
+    def get_updates(self, offset=None, timeout=10):
+        """
+        Poll Telegram for inbound messages since `offset` (long-polling,
+        bounded by `timeout`).
+
+        Args:
+            offset: Only return updates with update_id >= offset. Pass the
+                previous batch's (max update_id + 1) in a follow-up call to
+                mark those as consumed -- Telegram then never returns them
+                again, to any process, from that point on. No local state
+                needs to persist between polls for this to work.
+            timeout: Seconds Telegram may hold the connection open waiting
+                for a new message before returning an empty result.
+
+        Returns:
+            list[dict]: Raw Telegram Update objects, or [] on any failure
+            or when not configured -- a poll failure must never crash the
+            poller workflow, it just means "check again next time."
+        """
+        if not self.bot_token:
+            logger.error("Telegram not configured — cannot poll for updates")
+            return []
+
+        url = f"{TELEGRAM_API_BASE}/bot{self.bot_token}/getUpdates"
+        params = {'timeout': timeout}
+        if offset is not None:
+            params['offset'] = offset
+        try:
+            response = requests.get(url, params=params, timeout=timeout + DEFAULT_HTTP_TIMEOUT[1])
+            if response.status_code == 200:
+                body = response.json()
+                if body.get('ok'):
+                    return body.get('result', [])
+            logger.error(f"Telegram getUpdates failed: {response.status_code} {response.text}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to poll Telegram getUpdates: {e}")
+        return []
 
     def generate_summary_text(self, analysis_results, sector_data=None,
                               breadth=None, checkpoint='mid', alerts=None):
@@ -143,7 +225,8 @@ class TelegramNotifier:
                 alert per symbol is included so the message stays compact.
 
         Returns:
-            str: Telegram-HTML formatted message text.
+            str: Telegram-HTML formatted message text, always ending with
+            a link to the live dashboard (DASHBOARD_URL).
         """
         now = now_eat().strftime('%Y-%m-%d %H:%M EAT')
         total = len(analysis_results)
@@ -204,5 +287,8 @@ class TelegramNotifier:
             for sym, sym_alerts in alerts.items():
                 if sym_alerts:
                     lines.append(f"⚠ {sym}: {sym_alerts[0]}")
+
+        lines.append("")
+        lines.append(f"📊 Full dashboard: {DASHBOARD_URL}")
 
         return "\n".join(lines)

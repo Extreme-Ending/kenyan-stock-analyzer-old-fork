@@ -96,24 +96,24 @@ def get_checkpoint() -> str:
     return value
 
 
-def main():
-    checkpoint = get_checkpoint()
+def build_summary(force_refresh=False):
+    """
+    Run the lean pipeline (fetch -> analyze -> validate -> fundamentals ->
+    score) and build the compact summary PDF/HTML.
 
-    logger.info("=" * 60)
-    logger.info(f"NSE SUMMARY [{checkpoint.upper()}] — {datetime.now():%Y-%m-%d %H:%M}")
-    logger.info("=" * 60)
+    Extracted out of main() so telegram_poller.py can build the exact same
+    artifacts on demand (a new subscriber's welcome message, an owner-
+    triggered /refresh) without duplicating this ~100-line pipeline.
 
-    # Skip weekends and Kenyan public holidays (NSE is closed — no new data).
-    # Pass --ignore-calendar to force a run anyway (e.g. manual testing).
-    if '--ignore-calendar' not in sys.argv:
-        closed, reason = market_closed_today()
-        if closed:
-            logger.info(f"NSE is closed today ({reason}) — skipping [{checkpoint}] summary.")
-            print(f"Skipped: NSE closed today ({reason}). No notification sent.")
-            return
+    Args:
+        force_refresh: Skip the data/fundamentals cache and fetch live.
 
-    force = '--force-refresh' in sys.argv
-
+    Returns:
+        dict: {analysis_results, sector_data, breadth, alerts, pdf_path,
+        ics_path, built_result}. `built_result` is whatever
+        report_gen.generate_summary() returned, kept only for the
+        "built but not sent" log/print message at the call site.
+    """
     # New day → wipe stale data cache so the first run fetches fresh (does NOT
     # touch the reports folder here, to avoid clobbering a local dashboard).
     from utils import enforce_daily_cache
@@ -129,7 +129,7 @@ def main():
 
     # ---- Data + analysis ----
     logger.info("Fetching stock data...")
-    stock_data = data_acq.fetch_all_stocks(period='6mo', interval='1d', force_refresh=force)
+    stock_data = data_acq.fetch_all_stocks(period='6mo', interval='1d', force_refresh=force_refresh)
     if not stock_data:
         logger.error("No stock data — aborting summary")
         sys.exit(1)
@@ -157,7 +157,7 @@ def main():
 
     # ---- Fundamentals ----
     fund_analyzer = FundamentalAnalysis(cache_dir=config.cache_dir)
-    fundamentals_data = fund_analyzer.fetch_all_fundamentals(force_refresh=force)
+    fundamentals_data = fund_analyzer.fetch_all_fundamentals(force_refresh=force_refresh)
 
     # ---- Validate dividends against the authoritative NSE calendar ----
     try:
@@ -217,14 +217,48 @@ def main():
     elif isinstance(result, str) and result.endswith('.pdf'):
         pdf_path = result
 
+    return {
+        'analysis_results': analysis_results,
+        'sector_data': sector_data,
+        'breadth': breadth,
+        'alerts': alerts,
+        'pdf_path': pdf_path,
+        'ics_path': ics_path,
+        'built_result': result,
+    }
+
+
+def main():
+    checkpoint = get_checkpoint()
+
+    logger.info("=" * 60)
+    logger.info(f"NSE SUMMARY [{checkpoint.upper()}] — {datetime.now():%Y-%m-%d %H:%M}")
+    logger.info("=" * 60)
+
+    # Skip weekends and Kenyan public holidays (NSE is closed — no new data).
+    # Pass --ignore-calendar to force a run anyway (e.g. manual testing).
+    if '--ignore-calendar' not in sys.argv:
+        closed, reason = market_closed_today()
+        if closed:
+            logger.info(f"NSE is closed today ({reason}) — skipping [{checkpoint}] summary.")
+            print(f"Skipped: NSE closed today ({reason}). No notification sent.")
+            return
+
+    force = '--force-refresh' in sys.argv
+    artifacts = build_summary(force_refresh=force)
+
     # ---- Deliver on the requested checkpoint ----
     # open  -> email (full summary + PDF + .ics)
     # mid   -> Telegram (short intraday pulse, text only)
     # close -> Telegram (end-of-day summary + PDF)
     if checkpoint == 'open':
-        ok = send_open_email(config, analysis_results, sector_data, breadth, pdf_path, ics_path, result)
+        ok = send_open_email(config, artifacts['analysis_results'], artifacts['sector_data'],
+                             artifacts['breadth'], artifacts['pdf_path'], artifacts['ics_path'],
+                             artifacts['built_result'])
     else:
-        ok = send_telegram_update(config, checkpoint, analysis_results, sector_data, breadth, alerts, pdf_path, result)
+        ok = send_telegram_update(config, checkpoint, artifacts['analysis_results'], artifacts['sector_data'],
+                                  artifacts['breadth'], artifacts['alerts'], artifacts['pdf_path'],
+                                  artifacts['built_result'])
 
     if not ok:
         sys.exit(1)
@@ -298,7 +332,14 @@ def send_telegram_update(config, checkpoint, analysis_results, sector_data, brea
         return True
 
     from telegram_notifier import TelegramNotifier
+    from telegram_subscribers import load_subscribers
     notifier = TelegramNotifier(config)
+    # Scheduled checkpoints broadcast to everyone who has ever messaged the
+    # bot (telegram_poller.py), in addition to the fixed owner config --
+    # not just config.telegram_chat_ids. Owner-only sends (e.g. an
+    # owner-triggered /refresh) go through send_message_to/send_document_to
+    # directly instead, bypassing this broadcast list entirely.
+    notifier.chat_ids = sorted(set(notifier.chat_ids) | set(load_subscribers()))
 
     # 'mid' -> text-only intraday pulse (no breadth/sectors, keeps it short).
     # 'close' -> full text summary plus the PDF as a document attachment.

@@ -240,6 +240,47 @@ a real triggered run's downloaded PDF artifact:
     those. Confirmed against a real triggered run: PDF showed "10:04
     EAT" for a run that executed at 07:04 UTC.
 
+STATUS (2026-09-04, 1b-ii): Built, differently from this section's
+original plan -- API Gateway + Lambda was the assumption when this was
+written, but AWS was ruled out entirely for this project (see 0a's
+STATUS). Went with short-interval polling instead of a webhook: GitHub
+Actions can't run an always-on server to receive one, so a new
+.github/workflows/telegram-poller.yml polls Telegram's getUpdates every
+5 minutes (GitHub's minimum cron granularity) via telegram_poller.py.
+No local state needed to track already-seen messages -- passing
+offset=<last update_id>+1 back to Telegram marks them consumed
+server-side for good, regardless of which process polls next.
+Also skipped waiting on section 7's read API: rather than serving
+pre-computed scores from a JSON blob, an on-demand request just re-runs
+send_summary.py's lean pipeline directly (new build_summary() function,
+extracted out of send_summary.py's main() so both call sites share it) --
+simpler, no extra data plumbing, at the cost of a ~1-2 min reply instead
+of instant. Two behaviors, by sender:
+  - Owner's configured TELEGRAM_CHAT_ID sending exactly "/refresh" ->
+    triggers a full data refresh AND a dashboard rebuild+redeploy (a
+    second workflow job, gated on a `refresh_requested` output from the
+    polling job) -- sent back to the owner only, never broadcast, so
+    testing doesn't spam other subscribers.
+  - Anyone else's first message -> added to a new persisted subscriber
+    list (src/telegram_subscribers.py,
+    data/history/telegram_subscribers.json, committed back to the repo
+    by the poller workflow -- ephemeral runners need this to survive
+    across runs) and immediately sent the current summary + PDF as a
+    welcome. send_summary.py's mid/close Telegram checkpoints now
+    broadcast to this list too (unioned with the owner's fixed config),
+    not just the originally-configured chat ID -- this was an explicit
+    scope change from the project owner mid-build ("anyone who adds the
+    bot... should receive... the 3 crons response").
+Every Telegram message (scheduled or on-demand) now also links the live
+dashboard (telegram_notifier.DASHBOARD_URL, appended in
+generate_summary_text()), tying back into 0a's GitHub Pages deployment.
+14 new tests (subscriber list persistence incl. corrupt-file fail-safe;
+get_updates/send_message_to/send_document_to incl. failure modes; the
+owner-vs-stranger /refresh routing logic specifically, since misrouting
+that is the one security-relevant bug this design could have). Not yet
+verified live -- next step is push + a real /refresh from the owner's
+Telegram to observe end-to-end.
+
 1c. WhatsApp (real constraints — decide before building)
 --------------------------------------------------------------
 Unlike Telegram, WhatsApp has no free/instant personal-bot route.
@@ -444,9 +485,10 @@ useful guide instead of going stale silently.)
 10. WhatsApp push notification (1c) — not started, real setup
     friction (Meta Business verification or Twilio), do only once
     there's demand for a channel beyond Telegram/email.
-11. Interactive bot + read API (1b-ii, 7) — not started. Optional;
-    only worth building once something actually needs fast
-    on-demand data instead of the scheduled summaries.
+11. Interactive bot (1b-ii) — DONE, via polling not a webhook (no
+    AWS). Pending live verification (push + a real /refresh to
+    observe). Section 7's read API remains not started/optional --
+    the bot re-runs the lean pipeline on demand instead of needing it.
 12. Lambda/SNS for the notification pipeline (0b/0c) — not decided.
     No evidence yet that GitHub Actions is insufficient for this
     project's scale; revisit only if that changes.

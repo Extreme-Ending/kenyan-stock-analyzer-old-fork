@@ -1153,6 +1153,185 @@ class TestTelegramNotifier(unittest.TestCase):
         result = notifier.send_document('/nonexistent/path.pdf')
         self.assertFalse(result)
 
+    def test_summary_text_includes_dashboard_url(self):
+        from telegram_notifier import TelegramNotifier, DASHBOARD_URL
+        config = Config()
+        notifier = TelegramNotifier(config)
+
+        results, sectors, breadth = self._sample_summary_inputs()
+        text = notifier.generate_summary_text(results, sectors, breadth, checkpoint='close')
+        self.assertIn(DASHBOARD_URL, text)
+
+    def test_send_message_to_single_recipient_success(self):
+        from telegram_notifier import TelegramNotifier
+        config = Config()
+        config.telegram_bot_token = 'test-token'
+        config.telegram_chat_ids = []
+        notifier = TelegramNotifier(config)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {'ok': True}
+
+        with patch('telegram_notifier.requests.post', return_value=mock_response) as mock_post:
+            result = notifier.send_message_to('99999', 'Hi there')
+
+        self.assertTrue(result)
+        mock_post.assert_called_once()
+        self.assertEqual(mock_post.call_args.kwargs['json']['chat_id'], '99999')
+
+    def test_send_message_to_not_configured(self):
+        """Failure mode: no bot token at all must fail safe, not raise."""
+        from telegram_notifier import TelegramNotifier
+        config = Config()
+        config.telegram_bot_token = ''
+        notifier = TelegramNotifier(config)
+
+        result = notifier.send_message_to('99999', 'Hi there')
+        self.assertFalse(result)
+
+    def test_get_updates_success(self):
+        from telegram_notifier import TelegramNotifier
+        config = Config()
+        config.telegram_bot_token = 'test-token'
+        notifier = TelegramNotifier(config)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'ok': True,
+            'result': [{'update_id': 1, 'message': {'chat': {'id': 555}, 'text': 'hi'}}],
+        }
+
+        with patch('telegram_notifier.requests.get', return_value=mock_response):
+            updates = notifier.get_updates()
+
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0]['update_id'], 1)
+
+    def test_get_updates_network_failure(self):
+        """Failure mode: a network error must degrade to [], not raise."""
+        from telegram_notifier import TelegramNotifier
+        config = Config()
+        config.telegram_bot_token = 'test-token'
+        notifier = TelegramNotifier(config)
+
+        with patch('telegram_notifier.requests.get',
+                   side_effect=requests.exceptions.ConnectionError('boom')):
+            updates = notifier.get_updates()
+
+        self.assertEqual(updates, [])
+
+    def test_get_updates_not_configured(self):
+        """Failure mode: missing bot token must fail safe, not raise."""
+        from telegram_notifier import TelegramNotifier
+        config = Config()
+        config.telegram_bot_token = ''
+        notifier = TelegramNotifier(config)
+
+        updates = notifier.get_updates()
+        self.assertEqual(updates, [])
+
+
+class TestTelegramSubscribers(unittest.TestCase):
+    """Test the persisted Telegram subscriber list (src/telegram_subscribers.py)."""
+
+    def setUp(self):
+        self.tempdir = tempfile.mkdtemp()
+        self.path = os.path.join(self.tempdir, 'subscribers.json')
+
+    def test_load_missing_file_returns_empty(self):
+        from telegram_subscribers import load_subscribers
+        self.assertEqual(load_subscribers(self.path), [])
+
+    def test_add_and_load_round_trip(self):
+        from telegram_subscribers import add_subscriber, load_subscribers
+        added = add_subscriber('12345', path=self.path)
+        self.assertTrue(added)
+        self.assertEqual(load_subscribers(self.path), ['12345'])
+
+    def test_add_subscriber_dedup(self):
+        """Adding the same chat ID twice must not duplicate it or re-report as new."""
+        from telegram_subscribers import add_subscriber, load_subscribers
+        add_subscriber('12345', path=self.path)
+        added_again = add_subscriber('12345', path=self.path)
+        self.assertFalse(added_again)
+        self.assertEqual(load_subscribers(self.path), ['12345'])
+
+    def test_load_corrupt_json_fails_safe(self):
+        """Failure mode: malformed JSON must degrade to [], not raise."""
+        from telegram_subscribers import load_subscribers
+        with open(self.path, 'w') as f:
+            f.write('{not valid json')
+        self.assertEqual(load_subscribers(self.path), [])
+
+    def test_load_wrong_type_fails_safe(self):
+        """Failure mode: valid JSON that isn't a list must degrade to []."""
+        from telegram_subscribers import load_subscribers
+        with open(self.path, 'w') as f:
+            f.write('{"not": "a list"}')
+        self.assertEqual(load_subscribers(self.path), [])
+
+
+class TestTelegramPoller(unittest.TestCase):
+    """Test telegram_poller.py's owner-vs-subscriber routing logic (the one
+    part of the poller with real branching to get wrong), with synthetic
+    updates -- never hits the real Bot API."""
+
+    def setUp(self):
+        self.tempdir = tempfile.mkdtemp()
+        self.path = os.path.join(self.tempdir, 'subscribers.json')
+
+    @staticmethod
+    def _text_update(update_id, chat_id, text):
+        return {'update_id': update_id, 'message': {'chat': {'id': chat_id}, 'text': text}}
+
+    def test_owner_refresh_command_recognized(self):
+        from telegram_poller import partition_updates
+        updates = [self._text_update(1, 'OWNER1', '/refresh')]
+        refresh, new_subs = partition_updates(updates, owner_ids={'OWNER1'}, subscribers_path=self.path)
+        self.assertTrue(refresh)
+        self.assertEqual(new_subs, [])
+
+    def test_stranger_cannot_trigger_refresh(self):
+        """Security: only a configured owner chat ID may trigger /refresh --
+        anyone else sending it is treated as a new subscriber instead."""
+        from telegram_poller import partition_updates
+        updates = [self._text_update(1, 'STRANGER', '/refresh')]
+        refresh, new_subs = partition_updates(updates, owner_ids={'OWNER1'}, subscribers_path=self.path)
+        self.assertFalse(refresh)
+        self.assertEqual(new_subs, ['STRANGER'])
+
+    def test_new_subscriber_recorded(self):
+        from telegram_poller import partition_updates
+        updates = [self._text_update(1, 'NEWCHAT', 'hello')]
+        refresh, new_subs = partition_updates(updates, owner_ids={'OWNER1'}, subscribers_path=self.path)
+        self.assertFalse(refresh)
+        self.assertEqual(new_subs, ['NEWCHAT'])
+
+    def test_existing_subscriber_not_rewelcomed(self):
+        from telegram_poller import partition_updates
+        from telegram_subscribers import add_subscriber
+        add_subscriber('KNOWNCHAT', path=self.path)
+
+        updates = [self._text_update(1, 'KNOWNCHAT', 'hello again')]
+        refresh, new_subs = partition_updates(updates, owner_ids={'OWNER1'}, subscribers_path=self.path)
+        self.assertFalse(refresh)
+        self.assertEqual(new_subs, [])
+
+    def test_malformed_update_skipped_not_crashed(self):
+        """Failure mode: an update missing 'message'/'chat' must be skipped,
+        never raise (Telegram updates can be non-message types, e.g.
+        channel_post or callback_query)."""
+        from telegram_poller import partition_updates
+        updates = [
+            {'update_id': 1},  # no 'message' at all
+            {'update_id': 2, 'message': {'text': 'no chat field'}},
+        ]
+        refresh, new_subs = partition_updates(updates, owner_ids={'OWNER1'}, subscribers_path=self.path)
+        self.assertFalse(refresh)
+        self.assertEqual(new_subs, [])
+
 
 def run_tests():
     """Run all tests and print results."""
@@ -1178,6 +1357,8 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestReportGenerator))
     suite.addTests(loader.loadTestsFromTestCase(TestEmailNotifier))
     suite.addTests(loader.loadTestsFromTestCase(TestTelegramNotifier))
+    suite.addTests(loader.loadTestsFromTestCase(TestTelegramSubscribers))
+    suite.addTests(loader.loadTestsFromTestCase(TestTelegramPoller))
 
     # Run
     runner = unittest.TextTestRunner(verbosity=2)
