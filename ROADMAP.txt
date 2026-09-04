@@ -164,6 +164,30 @@ workflow_dispatch run of each checkpoint to confirm delivery end-to-end
 on the runner itself before trusting the schedule unattended.
 1b-ii (interactive bot / webhook) remains correctly sequenced after this
 and after section 7's read API.
+STATUS (2026-09-04, even later): 1b-i fully verified live. Manual
+workflow_dispatch runs of both mid and close checkpoints on the actual
+GitHub Actions runner succeeded end-to-end (Telegram message sent to
+1/1 chat(s) for mid; both the text update and the PDF via sendDocument
+for close), including the afx.kwayisi.org -> NSE PDF price-validation
+fallback firing cleanly (afx is unreachable from GitHub's runners) per
+item 5's fail-safe design. 1b-i is now fully closed out.
+Two follow-on fixes landed in the same pass, both live-verified against
+a real triggered run's downloaded PDF artifact:
+  - The summary PDF's Watchlist table was missing two fields that
+    already existed in the underlying data (fundamentals_data, scores)
+    but weren't surfaced in the compact daily summary: dividend amount
+    (Div KES, fund['dps_fy']) and the horizon classification (from
+    IMPROVEMENTS.txt item 8's score_stock()['horizon']), now shown
+    alongside the existing yield/score columns, color-coded to match
+    the dashboard's horizon badges.
+  - Every timestamp displayed with an "EAT" label (Telegram message,
+    email body, email Date header, summary PDF, dashboard subtitle) was
+    actually using naive datetime.now() -- correct on a Kenyan-timezone
+    machine, silently wrong by 3 hours on GitHub Actions runners (UTC).
+    New utils.now_eat() (tz-aware Africa/Nairobi, fail-safe fallback to
+    naive local time if tzdata is unavailable) now backs every one of
+    those. Confirmed against a real triggered run: PDF showed "10:04
+    EAT" for a run that executed at 07:04 UTC.
 
 1c. WhatsApp (real constraints — decide before building)
 --------------------------------------------------------------
