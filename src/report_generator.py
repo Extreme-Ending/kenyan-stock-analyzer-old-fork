@@ -816,8 +816,17 @@ class ReportGenerator:
             price_str = f"{price:.2f}" if price else '—'
             dy = fund.get('dividend_yield')
             dy_str = f"{dy:.1f}%" if dy else '—'
+            dps = fund.get('dps_fy')
+            dps_str = f"{dps:g}" if dps else '—'
             score = scores.get(sym, {}).get('overall')
             score_str = str(score) if score is not None else '—'
+            horizon = scores.get(sym, {}).get('horizon') or {}
+            h_label = horizon.get('label')
+            h_str = h_label or '—'
+            if horizon.get('period'):
+                h_str += f" · {horizon['period']}"
+            h_col = {'SHORT-TERM': '#2563eb', 'LONG-TERM': '#16a34a',
+                      'MIXED': '#f59e0b', 'UNCLEAR': '#94a3b8'}.get(h_label, '#94a3b8')
             sig_col = {'strong_buy': '#16a34a', 'buy': '#16a34a', 'neutral': '#d97706',
                        'sell': '#dc2626', 'strong_sell': '#dc2626'}.get(cls, '#94a3b8')
             wl_rows += (
@@ -826,7 +835,9 @@ class ReportGenerator:
                 f'<td>{price_str}</td>'
                 f'<td style="color:{chg_col};">{chg_str}</td>'
                 f'<td>{dy_str}</td>'
-                f'<td>{score_str}</td></tr>'
+                f'<td>{dps_str}</td>'
+                f'<td>{score_str}</td>'
+                f'<td style="color:{h_col};font-weight:700;">{h_str}</td></tr>'
             )
 
         # ---- Top movers ----
@@ -931,7 +942,7 @@ ul {{ margin: 4px 0; padding-left: 18px; }} li {{ margin: 2px 0; }}
 </div>
 {f'<div class="sub">Breadth: {breadth_str}</div>' if breadth_str else ''}
 <h2>⭐ Watchlist</h2>
-<table><thead><tr><th>Symbol</th><th>TV Signal</th><th>Price</th><th>Change</th><th>Yield</th><th>Score</th></tr></thead>
+<table><thead><tr><th>Symbol</th><th>TV Signal</th><th>Price</th><th>Change</th><th>Yield</th><th>Div KES</th><th>Score</th><th>Horizon</th></tr></thead>
 <tbody>{wl_rows}</tbody></table>
 <h2>📈 Top Movers</h2>
 <table><thead><tr><th>Dir</th><th>Symbol</th><th>Change</th></tr></thead><tbody>{movers_rows}</tbody></table>

@@ -954,6 +954,47 @@ class TestReportGenerator(unittest.TestCase):
         self.assertTrue(os.path.exists(path))
         self.assertGreater(os.path.getsize(path), 500)
 
+    def test_summary_includes_dividend_amount_and_horizon(self):
+        """Watchlist table in the PDF/HTML summary shows dividend-per-share
+        (KES) and the horizon classification alongside the existing yield
+        and score columns."""
+        data_dict = {
+            'SCOM': make_sample_data(60, seed=1),
+            'EQTY': make_sample_data(60, seed=2),
+        }
+        results = self.engine.analyze_multiple_stocks(data_dict)
+        fundamentals_data = {
+            'SCOM': {'dividend_yield': 5.0, 'dps_fy': 1.5},
+            'EQTY': {'dividend_yield': 3.0, 'dps_fy': 2.75},
+        }
+        from scoring import score_stock
+        scores = {sym: score_stock(sym, r, fundamentals_data.get(sym, {}))
+                  for sym, r in results.items()}
+        path = self.rg.generate_summary(
+            results, fundamentals_data=fundamentals_data, scores=scores,
+            watchlist=['SCOM', 'EQTY'], report_type='html',
+        )
+        self.assertTrue(os.path.exists(path))
+        with open(path) as f:
+            content = f.read()
+        self.assertIn('Div KES', content)
+        self.assertIn('Horizon', content)
+        self.assertIn('1.5', content)
+        self.assertIn('2.75', content)
+
+    def test_summary_missing_dividend_data_shows_placeholder(self):
+        """A stock with no dps_fy/horizon data degrades to '—', not a crash
+        or blank cell (fail-safe pattern)."""
+        data_dict = {'SCOM': make_sample_data(60, seed=1)}
+        results = self.engine.analyze_multiple_stocks(data_dict)
+        path = self.rg.generate_summary(
+            results, fundamentals_data={}, scores={},
+            watchlist=['SCOM'], report_type='html',
+        )
+        with open(path) as f:
+            content = f.read()
+        self.assertIn('—', content)
+
     def test_excel_export(self):
         data_dict = {
             'SCOM': make_sample_data(60, seed=1),
