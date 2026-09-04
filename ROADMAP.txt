@@ -230,6 +230,16 @@ building real user accounts unless there's demand for that.
   scraper and a flaky one need different fixes.
 - CI: run test.py on every push/PR via GitHub Actions, separate
   from the existing daily-summary.yml scheduled job.
+  STATUS (2026-09-04): Done. New .github/workflows/tests.yml runs
+  test.py on every push to main and every PR, matrix over Python
+  3.12 and 3.13 (pip-cached). Building this surfaced a real, unrelated
+  bug: README.md/CLAUDE.md both claimed a "Python 3.10+" baseline, but
+  requirements.txt's actual pins forced 3.12+ (numpy>=2.5.0 requires
+  3.12; tvkit>=0.11.2 alone would have forced 3.11+) -- caught because
+  the 3.10 and then 3.11 matrix legs failed at dependency install on
+  real GitHub-hosted runners, not a local guess. Corrected the stated
+  baseline in both docs to 3.12+ in the same change. Verified green on
+  both matrix legs on the actual runner.
 - Dockerize the pipeline — run.sh still assumes a macOS desktop
   (Homebrew's DYLD_LIBRARY_PATH); a Dockerfile removes "works on
   my machine" issues and is also a prerequisite for a clean
