@@ -139,11 +139,31 @@ TELEGRAM_CHAT_ID supports multiple comma-separated chat IDs
 block delivery to the others. Covered by test.py's
 TestTelegramNotifier (mocked HTTP, no live network). Verified
 locally end-to-end against real NSE data (2026-09-03).
-Not yet done: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID GitHub Actions
-secrets, the three-cron daily-summary.yml schedule (open/mid/close
-instead of the current single evening run), and 1b-ii (interactive
-bot / webhook — still correctly sequenced after this and after
-section 7's read API).
+STATUS (2026-09-04): The GitHub Actions half is also done now.
+daily-summary.yml (kept its filename to preserve Actions run history;
+renamed its display name to "NSE Notifications (Open / Mid / Close)")
+gained the three-cron schedule (09:15/12:00/15:20 EAT -> 06:15/09:00/
+12:20 UTC) plus a workflow_dispatch `checkpoint` choice input for manual
+runs. A new "Determine checkpoint" step maps github.event.schedule (the
+exact cron string that fired a scheduled run) to open/mid/close and
+passes it to send_summary.py via --checkpoint; falls back to 'open' if
+neither a known schedule nor workflow_dispatch matches (should never
+happen, but never silently no-ops either). Both EMAIL_* and
+TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID secrets are wired into the job env
+unconditionally — send_summary.py's own checkpoint dispatch decides
+which set actually gets read. YAML validated (parses cleanly, schedule
+list confirmed); the checkpoint-matching shell logic verified in
+isolation for all three cron strings plus the fallback case.
+STATUS (2026-09-04, later): TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID have now
+been added as GitHub Actions repo secrets by the user. 1b-i (Telegram
+push) is fully done end-to-end: local code, tests, and the GitHub
+Actions three-checkpoint schedule + secrets are all in place. Not yet
+verified: an actual live run of the mid/close checkpoints on the GitHub
+Actions runner (only verified locally so far) — worth a manual
+workflow_dispatch run of each checkpoint to confirm delivery end-to-end
+on the runner itself before trusting the schedule unattended.
+1b-ii (interactive bot / webhook) remains correctly sequenced after this
+and after section 7's read API.
 
 1c. WhatsApp (real constraints — decide before building)
 --------------------------------------------------------------

@@ -1,12 +1,24 @@
-name: Daily NSE Summary Email
+name: NSE Notifications (Open / Mid / Close)
 
-# Runs on GitHub's cloud — independent of any laptop.
+# Runs on GitHub's cloud — independent of any laptop. Three checkpoints a
+# day (see ROADMAP.txt section 1): open (email, full summary), mid and
+# close (Telegram, intraday pulse / EOD summary). Was a single evening
+# email; now a 3x/day multi-channel schedule.
 on:
   schedule:
-    # 19:00 UTC = 22:00 EAT (10:00 pm Kenya), Monday–Friday.
+    # Times in UTC; EAT = UTC+3, Kenya doesn't observe DST.
+    - cron: '15 6 * * 1-5'   # 09:15 EAT -- market open  -- email
+    - cron: '0 9 * * 1-5'    # 12:00 EAT -- mid-day       -- Telegram
+    - cron: '20 12 * * 1-5'  # 15:20 EAT -- market close  -- Telegram
     # Note: GitHub cron is UTC and may start a few minutes late under load.
-    - cron: '0 19 * * 1-5'
-  workflow_dispatch: {}   # allows manual "Run workflow" from the Actions tab
+  workflow_dispatch:         # manual "Run workflow" from the Actions tab
+    inputs:
+      checkpoint:
+        description: 'Checkpoint to run'
+        required: true
+        default: 'open'
+        type: choice
+        options: [open, mid, close]
 
 jobs:
   summary:
@@ -18,6 +30,24 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # GitHub tells a scheduled run which cron expression fired it
+      # (github.event.schedule); a manual run picks the checkpoint via the
+      # workflow_dispatch input above. Falls back to 'open' if neither
+      # matches (should never happen, but never silently no-op either).
+      - name: Determine checkpoint
+        id: checkpoint
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ github.event.inputs.checkpoint }}" >> "$GITHUB_OUTPUT"
+          else
+            case "${{ github.event.schedule }}" in
+              '15 6 * * 1-5') echo "value=open" >> "$GITHUB_OUTPUT" ;;
+              '0 9 * * 1-5') echo "value=mid" >> "$GITHUB_OUTPUT" ;;
+              '20 12 * * 1-5') echo "value=close" >> "$GITHUB_OUTPUT" ;;
+              *) echo "value=open" >> "$GITHUB_OUTPUT" ;;
+            esac
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -55,8 +85,11 @@ jobs:
 
       # Scheduled runs skip weekends & Kenyan public holidays (send_summary.py
       # checks the calendar). Manual runs pass --ignore-calendar so you can
-      # always test on any day.
-      - name: Build and email the daily summary
+      # always test on any day. send_summary.py's own checkpoint dispatch
+      # decides which channel actually fires (open->email, mid/close->
+      # Telegram) -- both sets of secrets are always available here, the
+      # unused set is simply never read for a given checkpoint.
+      - name: Build and send the summary
         env:
           ENABLE_EMAIL_NOTIFICATIONS: 'true'
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
@@ -64,8 +97,11 @@ jobs:
           EMAIL_RECIPIENTS: ${{ secrets.EMAIL_RECIPIENTS }}
           SMTP_HOST: smtp.gmail.com
           SMTP_PORT: '587'
+          ENABLE_TELEGRAM_NOTIFICATIONS: 'true'
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          ARGS="--force-refresh"
+          ARGS="--force-refresh --checkpoint ${{ steps.checkpoint.outputs.value }}"
           if [ "${{ github.event_name }}" != "schedule" ]; then
             ARGS="$ARGS --ignore-calendar"
           fi
