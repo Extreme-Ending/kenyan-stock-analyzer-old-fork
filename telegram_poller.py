@@ -105,8 +105,16 @@ def partition_updates(updates, owner_ids, subscribers_path=None):
 
 
 def main():
+    # print() alongside logger throughout this function -- matches
+    # send_summary.py's existing convention for CLI entry-point status
+    # output (see CLAUDE.md's Logging section), and unlike the logger
+    # calls, is guaranteed to show up in the GitHub Actions step log
+    # regardless of console-handler behavior in that environment. This
+    # poller runs unattended every 5 minutes; when a real /refresh comes
+    # in, the Actions log needs to be readable without guessing.
     if not config.enable_telegram_notifications:
         logger.warning("ENABLE_TELEGRAM_NOTIFICATIONS is false — poller has nothing to do.")
+        print("Telegram notifications disabled — nothing to poll.")
         _write_github_output('refresh_requested', 'false')
         return
 
@@ -116,10 +124,13 @@ def main():
     updates = notifier.get_updates()
     if not updates:
         logger.info("No new Telegram messages.")
+        print("No new Telegram messages.")
         _write_github_output('refresh_requested', 'false')
         return
 
+    print(f"Received {len(updates)} update(s) since last poll.")
     refresh_requested, new_subscribers = partition_updates(updates, owner_ids)
+    print(f"refresh_requested={refresh_requested}, new_subscribers={new_subscribers}")
 
     # Mark every update up to the highest update_id seen as consumed, so
     # the next poll (5 minutes from now, by a totally separate process)
@@ -134,6 +145,7 @@ def main():
 
     # Both a refresh and a welcome need the same freshly-built summary --
     # build it once and reuse it for whichever recipients need it.
+    print("Building summary artifacts...")
     from send_summary import build_summary
     artifacts = build_summary(force_refresh=refresh_requested)
     text = notifier.generate_summary_text(
@@ -144,9 +156,10 @@ def main():
 
     if refresh_requested:
         for chat_id in owner_ids:
-            notifier.send_message_to(chat_id, f"<b>Refresh complete.</b>\n\n{text}")
+            ok = notifier.send_message_to(chat_id, f"<b>Refresh complete.</b>\n\n{text}")
             if pdf_path and os.path.exists(pdf_path):
-                notifier.send_document_to(chat_id, pdf_path, caption="NSE Refresh Summary")
+                ok = notifier.send_document_to(chat_id, pdf_path, caption="NSE Refresh Summary") and ok
+            print(f"Refresh reply to owner {chat_id}: {'sent' if ok else 'FAILED'}")
 
     welcome_text = (
         "<b>Welcome to the NSE Stock Analyzer bot!</b>\n"
@@ -154,9 +167,10 @@ def main():
         f"{text}"
     )
     for chat_id in new_subscribers:
-        notifier.send_message_to(chat_id, welcome_text)
+        ok = notifier.send_message_to(chat_id, welcome_text)
         if pdf_path and os.path.exists(pdf_path):
-            notifier.send_document_to(chat_id, pdf_path, caption="NSE Daily Summary PDF")
+            ok = notifier.send_document_to(chat_id, pdf_path, caption="NSE Daily Summary PDF") and ok
+        print(f"Welcome message to new subscriber {chat_id}: {'sent' if ok else 'FAILED'}")
 
     _write_github_output('refresh_requested', 'true' if refresh_requested else 'false')
 
