@@ -17,11 +17,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # README's stated baseline (3.11 -- tvkit requires it, discovered
-        # when 3.10 failed dependency install here) and this project's
-        # actual dev venv (3.12, per CLAUDE.md) -- catches anything that
-        # only works on one of the two versions we claim to support.
-        python-version: ['3.11', '3.12']
+        # Real minimum is 3.12 -- numpy>=2.5.0 requires it (discovered here:
+        # 3.10 failed on tvkit needing 3.11+, then 3.11 failed on numpy
+        # needing 3.12+, corrected in README.md/CLAUDE.md too). 3.13 is the
+        # next minor, to catch anything that only works on one of the two.
+        python-version: ['3.12', '3.13']
 
     steps:
       - name: Checkout
