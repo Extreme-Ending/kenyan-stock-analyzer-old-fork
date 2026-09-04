@@ -34,35 +34,33 @@ we want a nicer URL than the raw S3 website endpoint.
 Excel export (.xlsx) can sync alongside if we want it downloadable
 from the same bucket; the earnings.ics file too.
 
-STATUS (2026-09-04): Done (plain S3 static website, no CloudFront/custom
-domain -- deliberately kept simple/cheap per the project owner's explicit
-preference; can add CloudFront later without touching the pipeline itself,
-just fronting the same bucket). New .github/workflows/deploy.yml runs on
-every push to main: `python main.py --force-refresh --no-email` (lean
-scope -- no --detailed/--export-excel, keeps runs fast and the S3
-footprint small; report_format defaults to html so no WeasyPrint system
-libs needed), then `aws s3 sync reports/ s3://<bucket>/ --delete`.
-AWS side, provisioned from scratch: S3 bucket
-kenyan-stock-analyzer-dashboard (eu-west-1) with static website hosting
-(index.html/index.html as index/error doc) and a public-read bucket
-policy; a GitHub Actions OIDC identity provider
-(token.actions.githubusercontent.com) plus an IAM role
-(github-actions-kenyan-stock-analyzer-deploy) whose trust policy is
-scoped to exactly repo:Extreme-Ending/kenyan-stock-analyzer on
-ref:refs/heads/main, carrying only s3:PutObject/GetObject/DeleteObject/
-ListBucket on that one bucket -- no long-lived AWS keys stored in GitHub
-at all. Role ARN/region/bucket name wired in as GitHub Actions repo
-variables (not secrets -- none of them are sensitive), read in the
-workflow via `${{ vars.* }}`. Live at:
-http://kenyan-stock-analyzer-dashboard.s3-website-eu-west-1.amazonaws.com/
-Known limitation, not fixed here: data/history/daily_snapshots.csv
-(IMPROVEMENTS.txt item 2's backtest input) never persists between GitHub
-Actions runs (ephemeral runner, data/ is gitignored) -- the deployed
-Track Record page will always show "insufficient_history" until history
-gets a persistent store (ties into section 2's CSV->SQLite item; SQLite
-alone doesn't fix this either unless the DB file itself is persisted
-somewhere across runs, e.g. synced to/from S3 -- deliberately deferred,
-not attempted in this change).
+STATUS (2026-09-04): Attempted, then fully torn down at the project
+owner's request ("I want all this to be private") before it ever went
+live -- not currently deployed anywhere. Built and provisioned from
+scratch (plain S3 static website, no CloudFront/custom domain, per the
+"simple and cheap" preference), then deleted the same session: the S3
+bucket, its public-read policy, the GitHub Actions OIDC identity
+provider, the IAM role, and the GitHub repo variables. The
+.github/workflows/deploy.yml file was removed too. Nothing was ever
+publicly exposed -- the bucket was confirmed empty (the first deploy
+run failed before reaching the S3 sync step) before teardown.
+Engineering notes worth keeping for whenever this gets revisited:
+  - GitHub's OIDC token `sub` claim was NOT the classic
+    `repo:OWNER/REPO:ref:refs/heads/BRANCH` format -- it came through as
+    `repo:OWNER@<org_id>/REPO@<repo_id>:ref:refs/heads/BRANCH` (an
+    "immutable ID" format, confirmed via CloudTrail after an
+    AssumeRoleWithWebIdentity AccessDenied). The IAM role trust policy
+    needs a StringLike condition covering both
+    `repo:Extreme-Ending/kenyan-stock-analyzer:ref:refs/heads/main` and
+    `repo:Extreme-Ending@*/kenyan-stock-analyzer@*:ref:refs/heads/main`
+    (or the exact immutable IDs) to actually match.
+  - Same known limitation as before, still applies whenever this is
+    rebuilt: data/history/daily_snapshots.csv (IMPROVEMENTS.txt item 2's
+    backtest input) won't persist between GitHub Actions runs (ephemeral
+    runner, data/ is gitignored) -- the Track Record page will always
+    show "insufficient_history" there until history gets a persistent
+    store (ties into section 2's CSV->SQLite item; SQLite alone doesn't
+    fix this unless the DB file itself is synced to/from S3 too).
 0b. Lambda — compute constraints to design around
 --------------------------------------------------------------
 Two real constraints, both worth checking before committing code
