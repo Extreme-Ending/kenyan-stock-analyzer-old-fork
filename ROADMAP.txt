@@ -34,6 +34,35 @@ we want a nicer URL than the raw S3 website endpoint.
 Excel export (.xlsx) can sync alongside if we want it downloadable
 from the same bucket; the earnings.ics file too.
 
+STATUS (2026-09-04): Done (plain S3 static website, no CloudFront/custom
+domain -- deliberately kept simple/cheap per the project owner's explicit
+preference; can add CloudFront later without touching the pipeline itself,
+just fronting the same bucket). New .github/workflows/deploy.yml runs on
+every push to main: `python main.py --force-refresh --no-email` (lean
+scope -- no --detailed/--export-excel, keeps runs fast and the S3
+footprint small; report_format defaults to html so no WeasyPrint system
+libs needed), then `aws s3 sync reports/ s3://<bucket>/ --delete`.
+AWS side, provisioned from scratch: S3 bucket
+kenyan-stock-analyzer-dashboard (eu-west-1) with static website hosting
+(index.html/index.html as index/error doc) and a public-read bucket
+policy; a GitHub Actions OIDC identity provider
+(token.actions.githubusercontent.com) plus an IAM role
+(github-actions-kenyan-stock-analyzer-deploy) whose trust policy is
+scoped to exactly repo:Extreme-Ending/kenyan-stock-analyzer on
+ref:refs/heads/main, carrying only s3:PutObject/GetObject/DeleteObject/
+ListBucket on that one bucket -- no long-lived AWS keys stored in GitHub
+at all. Role ARN/region/bucket name wired in as GitHub Actions repo
+variables (not secrets -- none of them are sensitive), read in the
+workflow via `${{ vars.* }}`. Live at:
+http://kenyan-stock-analyzer-dashboard.s3-website-eu-west-1.amazonaws.com/
+Known limitation, not fixed here: data/history/daily_snapshots.csv
+(IMPROVEMENTS.txt item 2's backtest input) never persists between GitHub
+Actions runs (ephemeral runner, data/ is gitignored) -- the deployed
+Track Record page will always show "insufficient_history" until history
+gets a persistent store (ties into section 2's CSV->SQLite item; SQLite
+alone doesn't fix this either unless the DB file itself is persisted
+somewhere across runs, e.g. synced to/from S3 -- deliberately deferred,
+not attempted in this change).
 0b. Lambda — compute constraints to design around
 --------------------------------------------------------------
 Two real constraints, both worth checking before committing code
