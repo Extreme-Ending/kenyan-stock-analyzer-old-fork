@@ -21,7 +21,7 @@ A fully automated daily stock analysis pipeline for the **Nairobi Securities Exc
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.11+ (tvkit, the TradingView data source, requires 3.11+)
 - macOS or Linux (Windows works but PDF generation requires extra setup)
 
 ### 1. Set up

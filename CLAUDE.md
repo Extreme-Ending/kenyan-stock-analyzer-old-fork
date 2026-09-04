@@ -80,7 +80,7 @@ of the full main.py run.
 
 # Python Version
 
-- Python 3.10+ (README baseline; dev venv here runs 3.12)
+- Python 3.11+ (README baseline -- tvkit requires it; dev venv here runs 3.12)
 - UTF-8
 - Prefer standard library before adding a dependency
 

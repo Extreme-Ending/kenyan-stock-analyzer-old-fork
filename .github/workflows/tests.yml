@@ -17,10 +17,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # README's stated baseline (3.10) and this project's actual dev
-        # venv (3.12, per CLAUDE.md) -- catches anything that only works
-        # on one of the two versions we claim to support.
-        python-version: ['3.10', '3.12']
+        # README's stated baseline (3.11 -- tvkit requires it, discovered
+        # when 3.10 failed dependency install here) and this project's
+        # actual dev venv (3.12, per CLAUDE.md) -- catches anything that
+        # only works on one of the two versions we claim to support.
+        python-version: ['3.11', '3.12']
 
     steps:
       - name: Checkout
